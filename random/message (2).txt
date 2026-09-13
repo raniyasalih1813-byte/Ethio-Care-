@@ -1,0 +1,3232 @@
+import os
+import sqlite3
+import hashlib
+import traceback
+from datetime import datetime
+import tkinter as tk
+from tkinter import ttk, messagebox
+
+try:
+    from PIL import Image, ImageTk
+    PIL_AVAILABLE = True
+except ImportError:
+    PIL_AVAILABLE = False
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DB = os.path.join(BASE_DIR, "ethio_dream_hospital_good.db")
+
+
+def hash_password(password):
+    return hashlib.sha256(password.encode("utf-8")).hexdigest()
+
+
+class HospitalApp(tk.Tk):
+    def __init__(self):
+        super().__init__()
+
+        self.title("Online Hospital Patient Services")
+        self.geometry("1280x760")
+        self.minsize(950, 650)
+
+        self.dark = False
+        self.current_user = None
+        self.current_role = None
+        self.current_view = None
+        self.image_refs = []
+
+        self.colors = {
+            "light": {
+                "bg": "#f4f7fb",
+                "card": "#ffffff",
+                "header": "#06233f",
+                "text": "#102a43",
+                "muted": "#64748b",
+                "border": "#e2e8f0",
+                "input": "#ffffff",
+                "button": "#1677d2",
+                "green": "#45b66b",
+                "purple": "#7048d8",
+                "blue": "#1677d2",
+                "danger": "#d9534f",
+                "white": "#ffffff"
+            },
+            "dark": {
+                "bg": "#101827",
+                "card": "#182334",
+                "header": "#071525",
+                "text": "#f1f5f9",
+                "muted": "#a7b2c3",
+                "border": "#2c3a4e",
+                "input": "#202d40",
+                "button": "#2587e8",
+                "green": "#45b66b",
+                "purple": "#805be0",
+                "blue": "#2587e8",
+                "danger": "#e05d59",
+                "white": "#ffffff"
+            }
+        }
+
+        self.report_callback_exception = self.handle_exception
+
+        self.setup_database()
+        self.show_home()
+
+    def handle_exception(self, exc, val, tb):
+        error_text = "".join(traceback.format_exception(exc, val, tb))
+
+        try:
+            with open(os.path.join(BASE_DIR, "system_error.log"), "a", encoding="utf-8") as f:
+                f.write("\n" + "=" * 70 + "\n")
+                f.write(datetime.now().strftime("%Y-%m-%d %H:%M:%S") + "\n")
+                f.write(error_text)
+        except Exception:
+            pass
+
+        messagebox.showerror(
+            "System Error",
+            "The system found an error, but the application will remain open.\n\n"
+            + str(val)
+        )
+
+    def connect(self):
+        con = sqlite3.connect(DB)
+        con.row_factory = sqlite3.Row
+        con.execute("PRAGMA foreign_keys = ON")
+        return con
+
+    def setup_database(self):
+        con = self.connect()
+
+        con.execute("""
+            CREATE TABLE IF NOT EXISTS patients (
+                patient_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                age INTEGER NOT NULL,
+                gender TEXT NOT NULL,
+                phone TEXT NOT NULL,
+                email TEXT NOT NULL UNIQUE,
+                address TEXT NOT NULL,
+                password TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+        """)
+
+        con.execute("""
+            CREATE TABLE IF NOT EXISTS hospitals (
+                hospital_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL UNIQUE,
+                address TEXT NOT NULL,
+                phone TEXT NOT NULL,
+                email TEXT NOT NULL UNIQUE,
+                password TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'approved',
+                created_at TEXT NOT NULL
+            )
+        """)
+
+        con.execute("""
+            CREATE TABLE IF NOT EXISTS doctors (
+                doctor_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                specialization TEXT NOT NULL,
+                phone TEXT NOT NULL,
+                email TEXT NOT NULL UNIQUE,
+                password TEXT NOT NULL,
+                hospital_id INTEGER,
+                status TEXT NOT NULL DEFAULT 'approved',
+                created_at TEXT NOT NULL,
+                FOREIGN KEY(hospital_id) REFERENCES hospitals(hospital_id)
+                    ON DELETE SET NULL
+            )
+        """)
+
+        con.execute("""
+            CREATE TABLE IF NOT EXISTS appointments (
+                appointment_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                patient_id INTEGER NOT NULL,
+                doctor_id INTEGER NOT NULL,
+                hospital_id INTEGER NOT NULL,
+                appointment_date TEXT NOT NULL,
+                appointment_time TEXT NOT NULL,
+                reason TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'Pending',
+                created_at TEXT NOT NULL,
+                FOREIGN KEY(patient_id) REFERENCES patients(patient_id)
+                    ON DELETE CASCADE,
+                FOREIGN KEY(doctor_id) REFERENCES doctors(doctor_id)
+                    ON DELETE CASCADE,
+                FOREIGN KEY(hospital_id) REFERENCES hospitals(hospital_id)
+                    ON DELETE CASCADE
+            )
+        """)
+
+        con.execute("""
+            CREATE TABLE IF NOT EXISTS medical_records (
+                record_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                patient_id INTEGER NOT NULL,
+                doctor_id INTEGER NOT NULL,
+                diagnosis TEXT NOT NULL,
+                notes TEXT NOT NULL,
+                record_date TEXT NOT NULL,
+                FOREIGN KEY(patient_id) REFERENCES patients(patient_id)
+                    ON DELETE CASCADE,
+                FOREIGN KEY(doctor_id) REFERENCES doctors(doctor_id)
+                    ON DELETE CASCADE
+            )
+        """)
+
+        con.execute("""
+            CREATE TABLE IF NOT EXISTS prescriptions (
+                prescription_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                patient_id INTEGER NOT NULL,
+                doctor_id INTEGER NOT NULL,
+                medicine TEXT NOT NULL,
+                instructions TEXT NOT NULL,
+                prescription_date TEXT NOT NULL,
+                FOREIGN KEY(patient_id) REFERENCES patients(patient_id)
+                    ON DELETE CASCADE,
+                FOREIGN KEY(doctor_id) REFERENCES doctors(doctor_id)
+                    ON DELETE CASCADE
+            )
+        """)
+
+        con.execute("""
+            CREATE TABLE IF NOT EXISTS payments (
+                payment_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                patient_id INTEGER NOT NULL,
+                amount REAL NOT NULL,
+                method TEXT NOT NULL,
+                reference TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'Paid',
+                payment_date TEXT NOT NULL,
+                FOREIGN KEY(patient_id) REFERENCES patients(patient_id)
+                    ON DELETE CASCADE
+            )
+        """)
+
+        con.execute("""
+            CREATE TABLE IF NOT EXISTS hospital_requests (
+                request_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                address TEXT NOT NULL,
+                phone TEXT NOT NULL,
+                email TEXT NOT NULL UNIQUE,
+                password TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'Pending',
+                created_at TEXT NOT NULL
+            )
+        """)
+
+        con.execute("""
+            CREATE TABLE IF NOT EXISTS medicines (
+                medicine_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                category TEXT NOT NULL,
+                description TEXT NOT NULL
+            )
+        """)
+
+        hospitals = [
+            (
+                "Ethio Dream General Hospital",
+                "Bole, Addis Ababa",
+                "+251911000001",
+                "info@ethiodream.com",
+                hash_password("hospital123")
+            ),
+            (
+                "Addis Medical Center",
+                "Megenagna, Addis Ababa",
+                "+251911000002",
+                "info@addismedical.com",
+                hash_password("hospital123")
+            )
+        ]
+
+        for h in hospitals:
+            con.execute("""
+                INSERT OR IGNORE INTO hospitals
+                (name, address, phone, email, password, status, created_at)
+                VALUES (?, ?, ?, ?, ?, 'approved', ?)
+            """, (*h, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+
+        hospital_rows = con.execute(
+            "SELECT hospital_id, name FROM hospitals"
+        ).fetchall()
+
+        hospital_map = {row["name"]: row["hospital_id"] for row in hospital_rows}
+
+        doctors = [
+            (
+                "Dr. Tigist",
+                "General Medicine",
+                "+251911111111",
+                "tigist@gmail.com",
+                hash_password("doctor123"),
+                hospital_map.get("Ethio Dream General Hospital")
+            ),
+            (
+                "Dr. Yonas",
+                "Cardiology",
+                "+251922222222",
+                "yonas@gmail.com",
+                hash_password("doctor123"),
+                hospital_map.get("Ethio Dream General Hospital")
+            ),
+            (
+                "Dr. Jhon",
+                "Pediatrics",
+                "+251933333333",
+                "jhon@gmail.com",
+                hash_password("doctor123"),
+                hospital_map.get("Addis Medical Center")
+            ),
+            (
+                "Dr. Sureya",
+                "Dermatology",
+                "+251944444444",
+                "sureya@gmail.com",
+                hash_password("doctor123"),
+                hospital_map.get("Addis Medical Center")
+            )
+        ]
+
+        for d in doctors:
+            con.execute("""
+                INSERT OR IGNORE INTO doctors
+                (name, specialization, phone, email, password,
+                 hospital_id, status, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, 'approved', ?)
+            """, (*d, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+
+        medicines = [
+            ("Paracetamol", "Pain Reliever",
+             "Common pain and fever medicine. Follow the recommended dose."),
+            ("Ibuprofen", "Pain Reliever",
+             "Used for pain, inflammation and fever."),
+            ("Amoxicillin", "Antibiotic",
+             "Prescription antibiotic. Use only as directed by a healthcare professional."),
+            ("Cetirizine", "Antihistamine",
+             "Used for allergy symptoms."),
+            ("Omeprazole", "Gastric",
+             "Used to reduce stomach acid.")
+        ]
+
+        for m in medicines:
+            exists = con.execute(
+                "SELECT medicine_id FROM medicines WHERE name = ?",
+                (m[0],)
+            ).fetchone()
+
+            if not exists:
+                con.execute("""
+                    INSERT INTO medicines
+                    (name, category, description)
+                    VALUES (?, ?, ?)
+                """, m)
+
+        con.commit()
+        con.close()
+
+    def c(self, name):
+        mode = "dark" if self.dark else "light"
+        return self.colors[mode][name]
+
+    def clear(self):
+        for widget in self.winfo_children():
+            widget.destroy()
+
+        self.image_refs = []
+
+    def make_scrollable(self):
+        outer = tk.Frame(self, bg=self.c("bg"))
+        outer.pack(fill="both", expand=True)
+
+        canvas = tk.Canvas(
+            outer,
+            bg=self.c("bg"),
+            highlightthickness=0
+        )
+
+        scrollbar = ttk.Scrollbar(
+            outer,
+            orient="vertical",
+            command=canvas.yview
+        )
+
+        canvas.configure(yscrollcommand=scrollbar.set)
+
+        scrollbar.pack(side="right", fill="y")
+        canvas.pack(side="left", fill="both", expand=True)
+
+        frame = tk.Frame(canvas, bg=self.c("bg"))
+
+        window_id = canvas.create_window(
+            (0, 0),
+            window=frame,
+            anchor="nw"
+        )
+
+        def resize(event):
+            canvas.itemconfig(window_id, width=event.width)
+            canvas.configure(scrollregion=canvas.bbox("all"))
+
+        frame.bind("<Configure>", resize)
+        canvas.bind("<Configure>", resize)
+
+        def wheel(event):
+            canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
+        canvas.bind_all("<MouseWheel>", wheel)
+
+        return frame
+
+    def header(self, parent, back=None):
+        top = tk.Frame(parent, bg=self.c("header"), height=112)
+        top.pack(fill="x")
+        top.pack_propagate(False)
+
+        if back:
+            tk.Button(
+                top,
+                text="←",
+                command=back,
+                bg=self.c("header"),
+                fg="white",
+                activebackground=self.c("header"),
+                activeforeground="white",
+                border=0,
+                font=("Segoe UI", 25, "bold"),
+                cursor="hand2"
+            ).pack(side="left", padx=(25, 5))
+
+        title = tk.Frame(top, bg=self.c("header"))
+        title.pack(side="left", padx=25)
+
+        tk.Label(
+            title,
+            text="✚  ONLINE HOSPITAL",
+            bg=self.c("header"),
+            fg="white",
+            font=("Segoe UI", 27, "bold")
+        ).pack(side="left")
+
+        tk.Label(
+            title,
+            text="  PATIENT SERVICES",
+            bg=self.c("header"),
+            fg="#8bbcff",
+            font=("Segoe UI", 17, "bold")
+        ).pack(side="left", padx=5, pady=(8, 0))
+
+        controls = tk.Frame(top, bg=self.c("header"))
+        controls.pack(side="right", padx=25)
+
+        tk.Button(
+            controls,
+            text="⚙",
+            command=self.settings_page,
+            bg="white",
+            fg="#17324d",
+            activebackground="white",
+            border=0,
+            font=("Segoe UI", 20),
+            width=3,
+            cursor="hand2"
+        ).pack(side="left", padx=4)
+
+        tk.Button(
+            controls,
+            text="☾" if not self.dark else "☀",
+            command=self.toggle_theme,
+            bg="white",
+            fg="#17324d",
+            activebackground="white",
+            border=0,
+            font=("Segoe UI", 20),
+            width=3,
+            cursor="hand2"
+        ).pack(side="left", padx=4)
+
+    def title_label(self, parent, text, size=30):
+        tk.Label(
+            parent,
+            text=text,
+            bg=self.c("bg"),
+            fg=self.c("text"),
+            font=("Segoe UI", size, "bold")
+        ).pack(pady=(35, 10))
+
+    def button(self, parent, text, command, color=None, width=18):
+        if color is None:
+            color = self.c("button")
+
+        return tk.Button(
+            parent,
+            text=text,
+            command=command,
+            bg=color,
+            fg="white",
+            activebackground=color,
+            activeforeground="white",
+            border=0,
+            font=("Segoe UI", 11, "bold"),
+            padx=15,
+            pady=10,
+            width=width,
+            cursor="hand2"
+        )
+
+    def field(self, parent, label, password=False):
+        tk.Label(
+            parent,
+            text=label,
+            bg=self.c("card"),
+            fg=self.c("text"),
+            font=("Segoe UI", 10, "bold")
+        ).pack(anchor="w", pady=(10, 4))
+
+        row = tk.Frame(parent, bg=self.c("card"))
+        row.pack(fill="x")
+
+        entry = tk.Entry(
+            row,
+            bg=self.c("input"),
+            fg=self.c("text"),
+            insertbackground=self.c("text"),
+            relief="solid",
+            bd=1,
+            font=("Segoe UI", 11)
+        )
+
+        if password:
+            entry.config(show="•")
+
+        entry.pack(side="left", fill="x", expand=True, ipady=8)
+
+        if password:
+            def toggle():
+                if entry.cget("show"):
+                    entry.config(show="")
+                    show_button.config(text="Hide")
+                else:
+                    entry.config(show="•")
+                    show_button.config(text="Show")
+
+            show_button = tk.Button(
+                row,
+                text="Show",
+                command=toggle,
+                bg=self.c("button"),
+                fg="white",
+                border=0,
+                font=("Segoe UI", 9, "bold"),
+                padx=10,
+                cursor="hand2"
+            )
+            show_button.pack(side="right", padx=(5, 0))
+
+        return entry
+
+    def card(self, parent, image_name, icon, title, description,
+             color, command):
+        card = tk.Frame(
+            parent,
+            bg=self.c("card"),
+            highlightbackground=self.c("border"),
+            highlightthickness=1
+        )
+
+        image_area = tk.Frame(
+            card,
+            bg=self.c("border"),
+            height=230
+        )
+        image_area.pack(fill="x", padx=5, pady=(5, 0))
+        image_area.pack_propagate(False)
+
+        path = os.path.join(BASE_DIR, image_name)
+
+        if PIL_AVAILABLE and os.path.exists(path):
+            try:
+                img = Image.open(path)
+                img.thumbnail((420, 230))
+                photo = ImageTk.PhotoImage(img)
+
+                image_label = tk.Label(
+                    image_area,
+                    image=photo,
+                    bg=self.c("border")
+                )
+                image_label.pack(fill="both", expand=True)
+                self.image_refs.append(photo)
+            except Exception:
+                tk.Label(
+                    image_area,
+                    text=icon,
+                    bg=self.c("border"),
+                    fg=self.c("text"),
+                    font=("Segoe UI", 60)
+                ).pack(expand=True)
+        else:
+            tk.Label(
+                image_area,
+                text=icon,
+                bg=self.c("border"),
+                fg=self.c("text"),
+                font=("Segoe UI", 60)
+            ).pack(expand=True)
+
+        icon_label = tk.Label(
+            card,
+            text=icon,
+            bg=color,
+            fg="white",
+            font=("Segoe UI", 21),
+            width=3,
+            height=1
+        )
+        icon_label.place(relx=0.5, y=205, anchor="center")
+
+        tk.Label(
+            card,
+            text=title,
+            bg=self.c("card"),
+            fg=self.c("text"),
+            font=("Segoe UI", 18, "bold")
+        ).pack(pady=(38, 8))
+
+        tk.Label(
+            card,
+            text=description,
+            bg=self.c("card"),
+            fg=self.c("muted"),
+            font=("Segoe UI", 10),
+            wraplength=270,
+            justify="center",
+            height=3
+        ).pack(padx=20)
+
+        self.button(
+            card,
+            "Open",
+            command,
+            color=color,
+            width=13
+        ).pack(pady=(10, 18))
+
+        return card
+
+    def show_home(self):
+        self.clear()
+        self.current_view = self.show_home
+
+        root_frame = self.make_scrollable()
+
+        self.header(root_frame)
+
+        hero = tk.Frame(root_frame, bg=self.c("bg"))
+        hero.pack(fill="x", pady=(55, 25))
+
+        tk.Label(
+            hero,
+            text="Healthcare made simple.",
+            bg=self.c("bg"),
+            fg=self.c("text"),
+            font=("Segoe UI", 38, "bold")
+        ).pack()
+
+        tk.Label(
+            hero,
+            text="A modern hospital service system for patients, doctors, hospitals and administrators.",
+            bg=self.c("bg"),
+            fg=self.c("muted"),
+            font=("Segoe UI", 14)
+        ).pack(pady=10)
+
+        cards = tk.Frame(root_frame, bg=self.c("bg"))
+        cards.pack(fill="x", padx=45, pady=20)
+
+        for i in range(4):
+            cards.columnconfigure(i, weight=1)
+
+        patient = self.card(
+            cards,
+            "patient.jpg",
+            "●",
+            "Patient",
+            "Create an account, book appointments and access medical information.",
+            self.c("blue"),
+            self.patient_login
+        )
+
+        doctor = self.card(
+            cards,
+            "doctor.jpg",
+            "♧",
+            "Doctor",
+            "Login to manage appointments, patients, medical records and prescriptions.",
+            self.c("green"),
+            self.doctor_login
+        )
+
+        hospital = self.card(
+            cards,
+            "hospital.jpg",
+            "✚",
+            "Hospital",
+            "Request to join Ethio Dream and wait for administrator approval.",
+            self.c("blue"),
+            self.hospital_login
+        )
+
+        admin = self.card(
+            cards,
+            "administrator.jpg",
+            "⚙",
+            "Administrator",
+            "Approve hospitals and manage the hospital network.",
+            self.c("purple"),
+            self.admin_login
+        )
+
+        patient.grid(row=0, column=0, sticky="nsew", padx=8)
+        doctor.grid(row=0, column=1, sticky="nsew", padx=8)
+        hospital.grid(row=0, column=2, sticky="nsew", padx=8)
+        admin.grid(row=0, column=3, sticky="nsew", padx=8)
+
+        services = tk.Frame(root_frame, bg=self.c("bg"))
+        services.pack(fill="x", padx=60, pady=(45, 25))
+
+        tk.Label(
+            services,
+            text="Quick Services",
+            bg=self.c("bg"),
+            fg=self.c("text"),
+            font=("Segoe UI", 23, "bold")
+        ).pack()
+
+        service_buttons = tk.Frame(services, bg=self.c("bg"))
+        service_buttons.pack(pady=15)
+
+        self.button(
+            service_buttons,
+            "🏥 View Hospitals",
+            self.public_hospitals,
+            self.c("blue"),
+            20
+        ).pack(side="left", padx=8)
+
+        self.button(
+            service_buttons,
+            "💊 Search Medicine",
+            self.medicine_search,
+            self.c("green"),
+            20
+        ).pack(side="left", padx=8)
+
+        footer = tk.Frame(
+            root_frame,
+            bg=self.c("header"),
+            height=80
+        )
+        footer.pack(fill="x", pady=(40, 0))
+        footer.pack_propagate(False)
+
+        tk.Label(
+            footer,
+            text="© 2026 Online Hospital Patient Services. All rights reserved.",
+            bg=self.c("header"),
+            fg="white",
+            font=("Segoe UI", 10)
+        ).pack(expand=True)
+
+    def toggle_theme(self):
+        self.dark = not self.dark
+        if self.current_view:
+            self.current_view()
+
+    def settings_page(self):
+        self.clear()
+        self.current_view = self.settings_page
+
+        page = self.make_scrollable()
+        self.header(page, self.show_home)
+
+        self.title_label(page, "Settings")
+
+        box = tk.Frame(
+            page,
+            bg=self.c("card"),
+            highlightbackground=self.c("border"),
+            highlightthickness=1
+        )
+        box.pack(fill="x", padx=150, pady=20)
+
+        tk.Label(
+            box,
+            text="Appearance",
+            bg=self.c("card"),
+            fg=self.c("text"),
+            font=("Segoe UI", 16, "bold")
+        ).pack(anchor="w", padx=25, pady=(25, 5))
+
+        tk.Label(
+            box,
+            text="Choose how the application should appear.",
+            bg=self.c("card"),
+            fg=self.c("muted"),
+            font=("Segoe UI", 11)
+        ).pack(anchor="w", padx=25)
+
+        self.button(
+            box,
+            "☀ Light Mode" if self.dark else "☾ Dark Mode",
+            self.toggle_theme,
+            self.c("purple"),
+            20
+        ).pack(padx=25, pady=25, anchor="w")
+
+        self.button(
+            page,
+            "← Back to Home",
+            self.show_home,
+            self.c("blue"),
+            18
+        ).pack(pady=20)
+
+    def login_page(self, role, title, login_command, register_command=None):
+        self.clear()
+
+        if role == "patient":
+            self.current_view = self.patient_login
+        elif role == "doctor":
+            self.current_view = self.doctor_login
+        elif role == "hospital":
+            self.current_view = self.hospital_login
+        else:
+            self.current_view = self.admin_login
+
+        page = self.make_scrollable()
+        self.header(page, self.show_home)
+
+        tk.Label(
+            page,
+            text=title,
+            bg=self.c("bg"),
+            fg=self.c("text"),
+            font=("Segoe UI", 30, "bold")
+        ).pack(pady=(55, 10))
+
+        box = tk.Frame(
+            page,
+            bg=self.c("card"),
+            highlightbackground=self.c("border"),
+            highlightthickness=1
+        )
+        box.pack(
+            fill="x",
+            padx=350,
+            pady=20
+        )
+
+        if role == "admin":
+            user_entry = self.field(box, "Username")
+        else:
+            user_entry = self.field(box, "Email")
+
+        password_entry = self.field(
+            box,
+            "Password",
+            password=True
+        )
+
+        self.button(
+            box,
+            "Login",
+            lambda: login_command(
+                user_entry.get().strip(),
+                password_entry.get()
+            ),
+            self.c("blue"),
+            18
+        ).pack(pady=(25, 10))
+
+        if register_command:
+            self.button(
+                box,
+                "Create Account",
+                register_command,
+                self.c("green"),
+                18
+            ).pack(pady=(5, 25))
+
+    def patient_login(self):
+        self.login_page(
+            "patient",
+            "Patient Login",
+            self.do_patient_login,
+            self.patient_register
+        )
+
+    def doctor_login(self):
+        self.login_page(
+            "doctor",
+            "Doctor Login",
+            self.do_doctor_login
+        )
+
+    def hospital_login(self):
+        self.login_page(
+            "hospital",
+            "Hospital Login",
+            self.do_hospital_login,
+            self.hospital_register
+        )
+
+    def admin_login(self):
+        self.login_page(
+            "admin",
+            "Administrator Login",
+            self.do_admin_login
+        )
+
+    def do_patient_login(self, email, password):
+        if not email or not password:
+            messagebox.showwarning(
+                "Missing Information",
+                "Please enter email and password."
+            )
+            return
+
+        con = self.connect()
+        row = con.execute("""
+            SELECT *
+            FROM patients
+            WHERE email = ? AND password = ?
+        """, (email, hash_password(password))).fetchone()
+        con.close()
+
+        if row:
+            self.current_user = dict(row)
+            self.current_role = "patient"
+            self.patient_dashboard()
+        else:
+            messagebox.showerror(
+                "Login Failed",
+                "Incorrect email or password."
+            )
+
+    def do_doctor_login(self, email, password):
+        con = self.connect()
+        row = con.execute("""
+            SELECT *
+            FROM doctors
+            WHERE email = ? AND password = ? AND status = 'approved'
+        """, (email, hash_password(password))).fetchone()
+        con.close()
+
+        if row:
+            self.current_user = dict(row)
+            self.current_role = "doctor"
+            self.doctor_dashboard()
+        else:
+            messagebox.showerror(
+                "Login Failed",
+                "Incorrect email, password, or account not approved."
+            )
+
+    def do_hospital_login(self, email, password):
+        con = self.connect()
+        row = con.execute("""
+            SELECT *
+            FROM hospitals
+            WHERE email = ? AND password = ? AND status = 'approved'
+        """, (email, hash_password(password))).fetchone()
+        con.close()
+
+        if row:
+            self.current_user = dict(row)
+            self.current_role = "hospital"
+            self.hospital_dashboard()
+        else:
+            messagebox.showerror(
+                "Login Failed",
+                "Incorrect email, password, or hospital is not approved."
+            )
+
+    def do_admin_login(self, username, password):
+        if username == "admin" and password == "Admin@1234":
+            self.current_user = {
+                "username": "admin"
+            }
+            self.current_role = "admin"
+            self.admin_dashboard()
+        else:
+            messagebox.showerror(
+                "Login Failed",
+                "Incorrect administrator username or password."
+            )
+
+    def patient_register(self):
+        self.clear()
+        self.current_view = self.patient_register
+
+        page = self.make_scrollable()
+        self.header(page, self.patient_login)
+
+        self.title_label(page, "Create Patient Account")
+
+        box = tk.Frame(
+            page,
+            bg=self.c("card"),
+            highlightbackground=self.c("border"),
+            highlightthickness=1
+        )
+        box.pack(fill="x", padx=230, pady=20)
+
+        name = self.field(box, "Full Name")
+        age = self.field(box, "Age")
+
+        tk.Label(
+            box,
+            text="Gender",
+            bg=self.c("card"),
+            fg=self.c("text"),
+            font=("Segoe UI", 10, "bold")
+        ).pack(anchor="w", pady=(10, 4))
+
+        gender = ttk.Combobox(
+            box,
+            values=["Male", "Female", "Other"],
+            state="readonly",
+            font=("Segoe UI", 11)
+        )
+        gender.pack(fill="x", ipady=7)
+
+        phone = self.field(box, "Phone Number")
+
+        tk.Label(
+            box,
+            text="Gmail",
+            bg=self.c("card"),
+            fg=self.c("text"),
+            font=("Segoe UI", 10, "bold")
+        ).pack(anchor="w", pady=(10, 4))
+
+        email_row = tk.Frame(box, bg=self.c("card"))
+        email_row.pack(fill="x")
+
+        email_user = tk.Entry(
+            email_row,
+            bg=self.c("input"),
+            fg=self.c("text"),
+            insertbackground=self.c("text"),
+            relief="solid",
+            bd=1,
+            font=("Segoe UI", 11)
+        )
+        email_user.pack(side="left", fill="x", expand=True, ipady=8)
+
+        tk.Label(
+            email_row,
+            text="@gmail.com",
+            bg=self.c("card"),
+            fg=self.c("muted"),
+            font=("Segoe UI", 11)
+        ).pack(side="left", padx=8)
+
+        tk.Label(
+            box,
+            text="Address",
+            bg=self.c("card"),
+            fg=self.c("text"),
+            font=("Segoe UI", 10, "bold")
+        ).pack(anchor="w", pady=(10, 4))
+
+        address = ttk.Combobox(
+            box,
+            values=[
+                "Bole",
+                "Megenagna",
+                "Piassa",
+                "Kazanchis",
+                "CMC",
+                "Mexico",
+                "Sar Bet",
+                "Gerji",
+                "Lideta",
+                "Addis Ketema"
+            ],
+            font=("Segoe UI", 11)
+        )
+        address.pack(fill="x", ipady=7)
+
+        password = self.field(
+            box,
+            "Password",
+            password=True
+        )
+
+        confirm = self.field(
+            box,
+            "Confirm Password",
+            password=True
+        )
+
+        def save():
+            name_value = name.get().strip()
+            age_value = age.get().strip()
+            gender_value = gender.get().strip()
+            phone_value = phone.get().strip()
+            email_value = email_user.get().strip() + "@gmail.com"
+            address_value = address.get().strip()
+            password_value = password.get()
+            confirm_value = confirm.get()
+
+            if not name_value:
+                messagebox.showerror("Error", "Please enter your name.")
+                return
+
+            try:
+                age_number = int(age_value)
+            except ValueError:
+                messagebox.showerror(
+                    "Invalid Age",
+                    "Age must be a number."
+                )
+                return
+
+            if age_number < 1 or age_number > 120:
+                messagebox.showerror(
+                    "Invalid Age",
+                    "Please enter an age between 1 and 120."
+                )
+                return
+
+            if not gender_value:
+                messagebox.showerror(
+                    "Error",
+                    "Please select your gender."
+                )
+                return
+
+            if not phone_value:
+                messagebox.showerror(
+                    "Error",
+                    "Please enter your phone number."
+                )
+                return
+
+            if not email_user.get().strip():
+                messagebox.showerror(
+                    "Error",
+                    "Please enter your Gmail username."
+                )
+                return
+
+            if not address_value:
+                messagebox.showerror(
+                    "Error",
+                    "Please select your address."
+                )
+                return
+
+            if len(password_value) < 6:
+                messagebox.showerror(
+                    "Password",
+                    "Password must contain at least 6 characters."
+                )
+                return
+
+            if password_value != confirm_value:
+                messagebox.showerror(
+                    "Password",
+                    "Passwords do not match."
+                )
+                return
+
+            try:
+                con = self.connect()
+                con.execute("""
+                    INSERT INTO patients
+                    (name, age, gender, phone, email, address,
+                     password, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    name_value,
+                    age_number,
+                    gender_value,
+                    phone_value,
+                    email_value,
+                    address_value,
+                    hash_password(password_value),
+                    datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                ))
+                con.commit()
+                con.close()
+
+                messagebox.showinfo(
+                    "Success",
+                    "Patient account created successfully."
+                )
+                self.patient_login()
+
+            except sqlite3.IntegrityError:
+                messagebox.showerror(
+                    "Account Exists",
+                    "This Gmail is already registered."
+                )
+            except sqlite3.Error as e:
+                messagebox.showerror(
+                    "Database Error",
+                    str(e)
+                )
+
+        self.button(
+            box,
+            "Create Account",
+            save,
+            self.c("green"),
+            20
+        ).pack(pady=30)
+
+    def patient_dashboard(self):
+        self.clear()
+        self.current_view = self.patient_dashboard
+
+        page = self.make_scrollable()
+        self.header(page)
+
+        name = self.current_user.get("name", "Patient")
+
+        tk.Label(
+            page,
+            text=f"Welcome, {name}",
+            bg=self.c("bg"),
+            fg=self.c("text"),
+            font=("Segoe UI", 30, "bold")
+        ).pack(pady=(45, 5))
+
+        tk.Label(
+            page,
+            text="Manage your healthcare services from one place.",
+            bg=self.c("bg"),
+            fg=self.c("muted"),
+            font=("Segoe UI", 12)
+        ).pack()
+
+        grid = tk.Frame(page, bg=self.c("bg"))
+        grid.pack(fill="x", padx=120, pady=40)
+
+        actions = [
+            ("📅", "Book Appointment", self.book_appointment, self.c("blue")),
+            ("📋", "My Appointments", self.patient_appointments, self.c("green")),
+            ("👤", "My Profile", self.patient_profile, self.c("purple")),
+            ("🩺", "Medical Records", self.patient_records, self.c("blue")),
+            ("💊", "Prescriptions", self.patient_prescriptions, self.c("green")),
+            ("💳", "Payments", self.patient_payments, self.c("purple")),
+            ("🏥", "Hospitals", self.public_hospitals, self.c("blue")),
+            ("🔎", "Medicine Search", self.medicine_search, self.c("green"))
+        ]
+
+        for i in range(4):
+            grid.columnconfigure(i, weight=1)
+
+        for index, (icon, title, command, color) in enumerate(actions):
+            r = index // 4
+            c = index % 4
+
+            box = tk.Frame(
+                grid,
+                bg=self.c("card"),
+                highlightbackground=self.c("border"),
+                highlightthickness=1
+            )
+            box.grid(
+                row=r,
+                column=c,
+                padx=8,
+                pady=8,
+                sticky="nsew"
+            )
+
+            tk.Label(
+                box,
+                text=icon,
+                bg=self.c("card"),
+                fg=color,
+                font=("Segoe UI", 28)
+            ).pack(pady=(25, 8))
+
+            tk.Label(
+                box,
+                text=title,
+                bg=self.c("card"),
+                fg=self.c("text"),
+                font=("Segoe UI", 12, "bold")
+            ).pack(pady=5)
+
+            self.button(
+                box,
+                "Open",
+                command,
+                color,
+                11
+            ).pack(pady=(8, 22))
+
+        self.button(
+            page,
+            "Logout",
+            self.logout,
+            self.c("danger"),
+            16
+        ).pack(pady=30)
+
+    def patient_profile(self):
+        self.clear()
+        self.current_view = self.patient_profile
+
+        page = self.make_scrollable()
+        self.header(page, self.patient_dashboard)
+
+        self.title_label(page, "My Profile")
+
+        box = tk.Frame(
+            page,
+            bg=self.c("card"),
+            highlightbackground=self.c("border"),
+            highlightthickness=1
+        )
+        box.pack(fill="x", padx=250, pady=20)
+
+        fields = [
+            ("Patient ID", self.current_user.get("patient_id")),
+            ("Name", self.current_user.get("name")),
+            ("Age", self.current_user.get("age")),
+            ("Gender", self.current_user.get("gender")),
+            ("Phone", self.current_user.get("phone")),
+            ("Email", self.current_user.get("email")),
+            ("Address", self.current_user.get("address"))
+        ]
+
+        for label, value in fields:
+            row = tk.Frame(box, bg=self.c("card"))
+            row.pack(fill="x", padx=25, pady=10)
+
+            tk.Label(
+                row,
+                text=label,
+                bg=self.c("card"),
+                fg=self.c("muted"),
+                font=("Segoe UI", 10, "bold"),
+                width=15,
+                anchor="w"
+            ).pack(side="left")
+
+            tk.Label(
+                row,
+                text=str(value),
+                bg=self.c("card"),
+                fg=self.c("text"),
+                font=("Segoe UI", 11)
+            ).pack(side="left")
+
+    def table(self, parent, columns, rows):
+        frame = tk.Frame(parent, bg=self.c("card"))
+        frame.pack(fill="both", expand=True, padx=20, pady=20)
+
+        tree = ttk.Treeview(
+            frame,
+            columns=columns,
+            show="headings"
+        )
+
+        yscroll = ttk.Scrollbar(
+            frame,
+            orient="vertical",
+            command=tree.yview
+        )
+
+        xscroll = ttk.Scrollbar(
+            frame,
+            orient="horizontal",
+            command=tree.xview
+        )
+
+        tree.configure(
+            yscrollcommand=yscroll.set,
+            xscrollcommand=xscroll.set
+        )
+
+        yscroll.pack(side="right", fill="y")
+        xscroll.pack(side="bottom", fill="x")
+        tree.pack(fill="both", expand=True)
+
+        for column in columns:
+            tree.heading(column, text=column)
+            tree.column(column, width=150, anchor="center")
+
+        for row in rows:
+            tree.insert("", "end", values=row)
+
+        return tree
+
+    def patient_appointments(self):
+        self.clear()
+        self.current_view = self.patient_appointments
+
+        page = self.make_scrollable()
+        self.header(page, self.patient_dashboard)
+
+        self.title_label(page, "My Appointments")
+
+        con = self.connect()
+        rows = con.execute("""
+            SELECT
+                a.appointment_id,
+                d.name,
+                d.specialization,
+                h.name,
+                a.appointment_date,
+                a.appointment_time,
+                a.reason,
+                a.status
+            FROM appointments a
+            JOIN doctors d ON a.doctor_id = d.doctor_id
+            JOIN hospitals h ON a.hospital_id = h.hospital_id
+            WHERE a.patient_id = ?
+            ORDER BY a.appointment_date DESC
+        """, (self.current_user["patient_id"],)).fetchall()
+        con.close()
+
+        data = [
+            tuple(row)
+            for row in rows
+        ]
+
+        self.table(
+            page,
+            (
+                "ID",
+                "Doctor",
+                "Specialization",
+                "Hospital",
+                "Date",
+                "Time",
+                "Reason",
+                "Status"
+            ),
+            data
+        )
+
+    def book_appointment(self):
+        self.clear()
+        self.current_view = self.book_appointment
+
+        page = self.make_scrollable()
+        self.header(page, self.patient_dashboard)
+
+        self.title_label(page, "Book Appointment")
+
+        box = tk.Frame(
+            page,
+            bg=self.c("card"),
+            highlightbackground=self.c("border"),
+            highlightthickness=1
+        )
+        box.pack(fill="x", padx=250, pady=20)
+
+        con = self.connect()
+
+        hospitals = con.execute("""
+            SELECT hospital_id, name
+            FROM hospitals
+            WHERE status = 'approved'
+            ORDER BY name
+        """).fetchall()
+
+        hospital_values = [
+            f"{r['hospital_id']} - {r['name']}"
+            for r in hospitals
+        ]
+
+        tk.Label(
+            box,
+            text="Hospital",
+            bg=self.c("card"),
+            fg=self.c("text"),
+            font=("Segoe UI", 10, "bold")
+        ).pack(anchor="w", pady=(20, 4), padx=20)
+
+        hospital_combo = ttk.Combobox(
+            box,
+            values=hospital_values,
+            state="readonly",
+            font=("Segoe UI", 11)
+        )
+        hospital_combo.pack(fill="x", padx=20, ipady=7)
+
+        tk.Label(
+            box,
+            text="Doctor",
+            bg=self.c("card"),
+            fg=self.c("text"),
+            font=("Segoe UI", 10, "bold")
+        ).pack(anchor="w", pady=(15, 4), padx=20)
+
+        doctor_combo = ttk.Combobox(
+            box,
+            state="readonly",
+            font=("Segoe UI", 11)
+        )
+        doctor_combo.pack(fill="x", padx=20, ipady=7)
+
+        def load_doctors(event=None):
+            selected = hospital_combo.get()
+
+            if not selected:
+                return
+
+            hospital_id = selected.split(" - ")[0]
+
+            doctor_rows = con.execute("""
+                SELECT doctor_id, name, specialization
+                FROM doctors
+                WHERE hospital_id = ?
+                AND status = 'approved'
+            """, (hospital_id,)).fetchall()
+
+            doctor_combo["values"] = [
+                f"{r['doctor_id']} - {r['name']} ({r['specialization']})"
+                for r in doctor_rows
+            ]
+
+        hospital_combo.bind("<<ComboboxSelected>>", load_doctors)
+
+        date_entry = self.field(box, "Date (YYYY-MM-DD)")
+        time_entry = self.field(box, "Time (HH:MM)")
+        reason_entry = self.field(box, "Reason")
+
+        def save():
+            selected_hospital = hospital_combo.get()
+            selected_doctor = doctor_combo.get()
+
+            if not selected_hospital or not selected_doctor:
+                messagebox.showerror(
+                    "Error",
+                    "Please select hospital and doctor."
+                )
+                return
+
+            if not date_entry.get().strip():
+                messagebox.showerror("Error", "Please enter appointment date.")
+                return
+
+            if not time_entry.get().strip():
+                messagebox.showerror("Error", "Please enter appointment time.")
+                return
+
+            if not reason_entry.get().strip():
+                messagebox.showerror("Error", "Please enter the reason.")
+                return
+
+            hospital_id = int(
+                selected_hospital.split(" - ")[0]
+            )
+
+            doctor_id = int(
+                selected_doctor.split(" - ")[0]
+            )
+
+            try:
+                datetime.strptime(
+                    date_entry.get().strip(),
+                    "%Y-%m-%d"
+                )
+            except ValueError:
+                messagebox.showerror(
+                    "Invalid Date",
+                    "Use YYYY-MM-DD format."
+                )
+                return
+
+            try:
+                con.execute("""
+                    INSERT INTO appointments
+                    (patient_id, doctor_id, hospital_id,
+                     appointment_date, appointment_time,
+                     reason, status, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, 'Pending', ?)
+                """, (
+                    self.current_user["patient_id"],
+                    doctor_id,
+                    hospital_id,
+                    date_entry.get().strip(),
+                    time_entry.get().strip(),
+                    reason_entry.get().strip(),
+                    datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                ))
+
+                con.commit()
+
+                messagebox.showinfo(
+                    "Success",
+                    "Appointment booked successfully."
+                )
+
+                self.patient_appointments()
+
+            except sqlite3.Error as e:
+                messagebox.showerror(
+                    "Database Error",
+                    str(e)
+                )
+
+        self.button(
+            box,
+            "Book Appointment",
+            save,
+            self.c("blue"),
+            20
+        ).pack(pady=30)
+
+    def patient_records(self):
+        self.clear()
+        self.current_view = self.patient_records
+
+        page = self.make_scrollable()
+        self.header(page, self.patient_dashboard)
+
+        self.title_label(page, "Medical Records")
+
+        con = self.connect()
+
+        rows = con.execute("""
+            SELECT
+                r.record_id,
+                d.name,
+                r.diagnosis,
+                r.notes,
+                r.record_date
+            FROM medical_records r
+            JOIN doctors d ON r.doctor_id = d.doctor_id
+            WHERE r.patient_id = ?
+            ORDER BY r.record_date DESC
+        """, (self.current_user["patient_id"],)).fetchall()
+
+        con.close()
+
+        self.table(
+            page,
+            ("ID", "Doctor", "Diagnosis", "Notes", "Date"),
+            [tuple(r) for r in rows]
+        )
+
+    def patient_prescriptions(self):
+        self.clear()
+        self.current_view = self.patient_prescriptions
+
+        page = self.make_scrollable()
+        self.header(page, self.patient_dashboard)
+
+        self.title_label(page, "Prescriptions")
+
+        con = self.connect()
+
+        rows = con.execute("""
+            SELECT
+                p.prescription_id,
+                d.name,
+                p.medicine,
+                p.instructions,
+                p.prescription_date
+            FROM prescriptions p
+            JOIN doctors d ON p.doctor_id = d.doctor_id
+            WHERE p.patient_id = ?
+            ORDER BY p.prescription_date DESC
+        """, (self.current_user["patient_id"],)).fetchall()
+
+        con.close()
+
+        self.table(
+            page,
+            ("ID", "Doctor", "Medicine", "Instructions", "Date"),
+            [tuple(r) for r in rows]
+        )
+
+    def patient_payments(self):
+        self.clear()
+        self.current_view = self.patient_payments
+
+        page = self.make_scrollable()
+        self.header(page, self.patient_dashboard)
+
+        self.title_label(page, "Payments")
+
+        box = tk.Frame(
+            page,
+            bg=self.c("card"),
+            highlightbackground=self.c("border"),
+            highlightthickness=1
+        )
+        box.pack(fill="x", padx=300, pady=20)
+
+        amount = self.field(box, "Amount")
+
+        tk.Label(
+            box,
+            text="Payment Method",
+            bg=self.c("card"),
+            fg=self.c("text"),
+            font=("Segoe UI", 10, "bold")
+        ).pack(anchor="w", padx=20, pady=(10, 4))
+
+        method = ttk.Combobox(
+            box,
+            values=[
+                "Telebirr",
+                "CBE Birr",
+                "Bank Card",
+                "Bank Transfer"
+            ],
+            state="readonly",
+            font=("Segoe UI", 11)
+        )
+        method.pack(fill="x", padx=20, ipady=7)
+
+        reference = self.field(box, "Reference / Transaction Number")
+
+        def pay():
+            try:
+                amount_value = float(amount.get())
+            except ValueError:
+                messagebox.showerror(
+                    "Invalid Amount",
+                    "Amount must be a number."
+                )
+                return
+
+            if amount_value <= 0:
+                messagebox.showerror(
+                    "Invalid Amount",
+                    "Amount must be greater than zero."
+                )
+                return
+
+            if not method.get():
+                messagebox.showerror(
+                    "Error",
+                    "Please select payment method."
+                )
+                return
+
+            if not reference.get().strip():
+                messagebox.showerror(
+                    "Error",
+                    "Please enter payment reference."
+                )
+                return
+
+            try:
+                con = self.connect()
+
+                con.execute("""
+                    INSERT INTO payments
+                    (patient_id, amount, method, reference,
+                     status, payment_date)
+                    VALUES (?, ?, ?, ?, 'Paid', ?)
+                """, (
+                    self.current_user["patient_id"],
+                    amount_value,
+                    method.get(),
+                    reference.get().strip(),
+                    datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                ))
+
+                con.commit()
+                con.close()
+
+                messagebox.showinfo(
+                    "Payment Successful",
+                    "Payment recorded successfully.\n\n"
+                    "This is a simulated payment system."
+                )
+
+                self.patient_payments()
+
+            except sqlite3.Error as e:
+                messagebox.showerror(
+                    "Payment Error",
+                    str(e)
+                )
+
+        self.button(
+            box,
+            "Pay Now",
+            pay,
+            self.c("green"),
+            18
+        ).pack(pady=30)
+
+        con = self.connect()
+
+        rows = con.execute("""
+            SELECT
+                payment_id,
+                amount,
+                method,
+                reference,
+                status,
+                payment_date
+            FROM payments
+            WHERE patient_id = ?
+            ORDER BY payment_date DESC
+        """, (self.current_user["patient_id"],)).fetchall()
+
+        con.close()
+
+        self.title_label(page, "Payment History", 22)
+
+        self.table(
+            page,
+            ("ID", "Amount", "Method", "Reference", "Status", "Date"),
+            [tuple(r) for r in rows]
+        )
+
+    def doctor_dashboard(self):
+        self.clear()
+        self.current_view = self.doctor_dashboard
+
+        page = self.make_scrollable()
+        self.header(page)
+
+        tk.Label(
+            page,
+            text=f"Welcome, {self.current_user['name']}",
+            bg=self.c("bg"),
+            fg=self.c("text"),
+            font=("Segoe UI", 30, "bold")
+        ).pack(pady=(45, 5))
+
+        tk.Label(
+            page,
+            text=self.current_user["specialization"],
+            bg=self.c("bg"),
+            fg=self.c("muted"),
+            font=("Segoe UI", 13)
+        ).pack()
+
+        grid = tk.Frame(page, bg=self.c("bg"))
+        grid.pack(fill="x", padx=150, pady=45)
+
+        for i in range(3):
+            grid.columnconfigure(i, weight=1)
+
+        actions = [
+            ("📅", "Appointments", self.doctor_appointments, self.c("blue")),
+            ("📋", "Medical Records", self.doctor_records, self.c("green")),
+            ("💊", "Prescriptions", self.doctor_prescriptions, self.c("purple"))
+        ]
+
+        for i, (icon, title, command, color) in enumerate(actions):
+            box = tk.Frame(
+                grid,
+                bg=self.c("card"),
+                highlightbackground=self.c("border"),
+                highlightthickness=1
+            )
+            box.grid(row=0, column=i, padx=10, sticky="nsew")
+
+            tk.Label(
+                box,
+                text=icon,
+                bg=self.c("card"),
+                fg=color,
+                font=("Segoe UI", 35)
+            ).pack(pady=(30, 10))
+
+            tk.Label(
+                box,
+                text=title,
+                bg=self.c("card"),
+                fg=self.c("text"),
+                font=("Segoe UI", 14, "bold")
+            ).pack()
+
+            self.button(
+                box,
+                "Open",
+                command,
+                color,
+                13
+            ).pack(pady=25)
+
+        self.button(
+            page,
+            "Logout",
+            self.logout,
+            self.c("danger"),
+            16
+        ).pack(pady=25)
+
+    def doctor_appointments(self):
+        self.clear()
+        self.current_view = self.doctor_appointments
+
+        page = self.make_scrollable()
+        self.header(page, self.doctor_dashboard)
+
+        self.title_label(page, "Doctor Appointments")
+
+        con = self.connect()
+
+        rows = con.execute("""
+            SELECT
+                a.appointment_id,
+                p.name,
+                h.name,
+                a.appointment_date,
+                a.appointment_time,
+                a.reason,
+                a.status
+            FROM appointments a
+            JOIN patients p ON a.patient_id = p.patient_id
+            JOIN hospitals h ON a.hospital_id = h.hospital_id
+            WHERE a.doctor_id = ?
+            ORDER BY a.appointment_date DESC
+        """, (self.current_user["doctor_id"],)).fetchall()
+
+        con.close()
+
+        tree = self.table(
+            page,
+            ("ID", "Patient", "Hospital", "Date", "Time", "Reason", "Status"),
+            [tuple(r) for r in rows]
+        )
+
+        box = tk.Frame(page, bg=self.c("bg"))
+        box.pack(pady=15)
+
+        self.button(
+            box,
+            "Accept",
+            lambda: self.update_appointment(tree, "Accepted"),
+            self.c("green"),
+            12
+        ).pack(side="left", padx=5)
+
+        self.button(
+            box,
+            "Reject",
+            lambda: self.update_appointment(tree, "Rejected"),
+            self.c("danger"),
+            12
+        ).pack(side="left", padx=5)
+
+        self.button(
+            box,
+            "Complete",
+            lambda: self.update_appointment(tree, "Completed"),
+            self.c("blue"),
+            12
+        ).pack(side="left", padx=5)
+
+    def update_appointment(self, tree, status):
+        selected = tree.selection()
+
+        if not selected:
+            messagebox.showwarning(
+                "Select Appointment",
+                "Please select an appointment."
+            )
+            return
+
+        values = tree.item(selected[0], "values")
+        appointment_id = values[0]
+
+        try:
+            con = self.connect()
+
+            con.execute("""
+                UPDATE appointments
+                SET status = ?
+                WHERE appointment_id = ?
+                AND doctor_id = ?
+            """, (
+                status,
+                appointment_id,
+                self.current_user["doctor_id"]
+            ))
+
+            con.commit()
+            con.close()
+
+            messagebox.showinfo(
+                "Updated",
+                f"Appointment marked as {status}."
+            )
+
+            self.doctor_appointments()
+
+        except sqlite3.Error as e:
+            messagebox.showerror(
+                "Error",
+                str(e)
+            )
+
+    def doctor_records(self):
+        self.clear()
+        self.current_view = self.doctor_records
+
+        page = self.make_scrollable()
+        self.header(page, self.doctor_dashboard)
+
+        self.title_label(page, "Add Medical Record")
+
+        box = tk.Frame(
+            page,
+            bg=self.c("card"),
+            highlightbackground=self.c("border"),
+            highlightthickness=1
+        )
+        box.pack(fill="x", padx=250, pady=20)
+
+        con = self.connect()
+
+        patients = con.execute("""
+            SELECT DISTINCT p.patient_id, p.name
+            FROM patients p
+            JOIN appointments a ON p.patient_id = a.patient_id
+            WHERE a.doctor_id = ?
+        """, (self.current_user["doctor_id"],)).fetchall()
+
+        con.close()
+
+        patient_combo = ttk.Combobox(
+            box,
+            values=[
+                f"{p['patient_id']} - {p['name']}"
+                for p in patients
+            ],
+            state="readonly",
+            font=("Segoe UI", 11)
+        )
+        patient_combo.pack(fill="x", padx=20, pady=(10, 20), ipady=7)
+
+        diagnosis = self.field(box, "Diagnosis")
+        notes = self.field(box, "Notes")
+
+        def save():
+            if not patient_combo.get():
+                messagebox.showerror("Error", "Select a patient.")
+                return
+
+            if not diagnosis.get().strip():
+                messagebox.showerror("Error", "Enter diagnosis.")
+                return
+
+            if not notes.get().strip():
+                messagebox.showerror("Error", "Enter notes.")
+                return
+
+            patient_id = int(
+                patient_combo.get().split(" - ")[0]
+            )
+
+            try:
+                con = self.connect()
+
+                con.execute("""
+                    INSERT INTO medical_records
+                    (patient_id, doctor_id, diagnosis, notes, record_date)
+                    VALUES (?, ?, ?, ?, ?)
+                """, (
+                    patient_id,
+                    self.current_user["doctor_id"],
+                    diagnosis.get().strip(),
+                    notes.get().strip(),
+                    datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                ))
+
+                con.commit()
+                con.close()
+
+                messagebox.showinfo(
+                    "Success",
+                    "Medical record added."
+                )
+
+            except sqlite3.Error as e:
+                messagebox.showerror("Error", str(e))
+
+        self.button(
+            box,
+            "Save Medical Record",
+            save,
+            self.c("green"),
+            22
+        ).pack(pady=30)
+
+    def doctor_prescriptions(self):
+        self.clear()
+        self.current_view = self.doctor_prescriptions
+
+        page = self.make_scrollable()
+        self.header(page, self.doctor_dashboard)
+
+        self.title_label(page, "Add Prescription")
+
+        box = tk.Frame(
+            page,
+            bg=self.c("card"),
+            highlightbackground=self.c("border"),
+            highlightthickness=1
+        )
+        box.pack(fill="x", padx=250, pady=20)
+
+        con = self.connect()
+
+        patients = con.execute("""
+            SELECT DISTINCT p.patient_id, p.name
+            FROM patients p
+            JOIN appointments a ON p.patient_id = a.patient_id
+            WHERE a.doctor_id = ?
+        """, (self.current_user["doctor_id"],)).fetchall()
+
+        con.close()
+
+        patient_combo = ttk.Combobox(
+            box,
+            values=[
+                f"{p['patient_id']} - {p['name']}"
+                for p in patients
+            ],
+            state="readonly",
+            font=("Segoe UI", 11)
+        )
+        patient_combo.pack(fill="x", padx=20, pady=20, ipady=7)
+
+        medicine = self.field(box, "Medicine")
+        instructions = self.field(box, "Instructions")
+
+        def save():
+            if not patient_combo.get():
+                messagebox.showerror("Error", "Select a patient.")
+                return
+
+            if not medicine.get().strip():
+                messagebox.showerror("Error", "Enter medicine.")
+                return
+
+            if not instructions.get().strip():
+                messagebox.showerror("Error", "Enter instructions.")
+                return
+
+            patient_id = int(
+                patient_combo.get().split(" - ")[0]
+            )
+
+            try:
+                con = self.connect()
+
+                con.execute("""
+                    INSERT INTO prescriptions
+                    (patient_id, doctor_id, medicine,
+                     instructions, prescription_date)
+                    VALUES (?, ?, ?, ?, ?)
+                """, (
+                    patient_id,
+                    self.current_user["doctor_id"],
+                    medicine.get().strip(),
+                    instructions.get().strip(),
+                    datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                ))
+
+                con.commit()
+                con.close()
+
+                messagebox.showinfo(
+                    "Success",
+                    "Prescription added."
+                )
+
+            except sqlite3.Error as e:
+                messagebox.showerror("Error", str(e))
+
+        self.button(
+            box,
+            "Save Prescription",
+            save,
+            self.c("purple"),
+            20
+        ).pack(pady=30)
+
+    def hospital_dashboard(self):
+        self.clear()
+        self.current_view = self.hospital_dashboard
+
+        page = self.make_scrollable()
+        self.header(page)
+
+        tk.Label(
+            page,
+            text=self.current_user["name"],
+            bg=self.c("bg"),
+            fg=self.c("text"),
+            font=("Segoe UI", 30, "bold")
+        ).pack(pady=(45, 5))
+
+        tk.Label(
+            page,
+            text=self.current_user["address"],
+            bg=self.c("bg"),
+            fg=self.c("muted"),
+            font=("Segoe UI", 13)
+        ).pack()
+
+        grid = tk.Frame(page, bg=self.c("bg"))
+        grid.pack(fill="x", padx=120, pady=45)
+
+        for i in range(3):
+            grid.columnconfigure(i, weight=1)
+
+        actions = [
+            ("🩺", "Manage Doctors", self.hospital_doctors, self.c("blue")),
+            ("📅", "Appointments", self.hospital_appointments, self.c("green")),
+            ("🏥", "Hospital Profile", self.hospital_profile, self.c("purple"))
+        ]
+
+        for i, (icon, title, command, color) in enumerate(actions):
+            box = tk.Frame(
+                grid,
+                bg=self.c("card"),
+                highlightbackground=self.c("border"),
+                highlightthickness=1
+            )
+            box.grid(row=0, column=i, padx=10, sticky="nsew")
+
+            tk.Label(
+                box,
+                text=icon,
+                bg=self.c("card"),
+                fg=color,
+                font=("Segoe UI", 35)
+            ).pack(pady=(30, 10))
+
+            tk.Label(
+                box,
+                text=title,
+                bg=self.c("card"),
+                fg=self.c("text"),
+                font=("Segoe UI", 14, "bold")
+            ).pack()
+
+            self.button(
+                box,
+                "Open",
+                command,
+                color,
+                13
+            ).pack(pady=25)
+
+        self.button(
+            page,
+            "Logout",
+            self.logout,
+            self.c("danger"),
+            16
+        ).pack(pady=25)
+
+    def hospital_profile(self):
+        self.clear()
+        self.current_view = self.hospital_profile
+
+        page = self.make_scrollable()
+        self.header(page, self.hospital_dashboard)
+
+        self.title_label(page, "Hospital Profile")
+
+        box = tk.Frame(
+            page,
+            bg=self.c("card"),
+            highlightbackground=self.c("border"),
+            highlightthickness=1
+        )
+        box.pack(fill="x", padx=250, pady=20)
+
+        values = [
+            ("Hospital ID", self.current_user["hospital_id"]),
+            ("Hospital Name", self.current_user["name"]),
+            ("Address", self.current_user["address"]),
+            ("Phone", self.current_user["phone"]),
+            ("Email", self.current_user["email"]),
+            ("Status", self.current_user["status"])
+        ]
+
+        for label, value in values:
+            row = tk.Frame(box, bg=self.c("card"))
+            row.pack(fill="x", padx=25, pady=10)
+
+            tk.Label(
+                row,
+                text=label,
+                bg=self.c("card"),
+                fg=self.c("muted"),
+                font=("Segoe UI", 10, "bold"),
+                width=18,
+                anchor="w"
+            ).pack(side="left")
+
+            tk.Label(
+                row,
+                text=str(value),
+                bg=self.c("card"),
+                fg=self.c("text"),
+                font=("Segoe UI", 11)
+            ).pack(side="left")
+
+    def hospital_doctors(self):
+        self.clear()
+        self.current_view = self.hospital_doctors
+
+        page = self.make_scrollable()
+        self.header(page, self.hospital_dashboard)
+
+        self.title_label(page, "Manage Doctors")
+
+        box = tk.Frame(
+            page,
+            bg=self.c("card"),
+            highlightbackground=self.c("border"),
+            highlightthickness=1
+        )
+        box.pack(fill="x", padx=250, pady=20)
+
+        name = self.field(box, "Doctor Name")
+        specialization = self.field(box, "Specialization")
+        phone = self.field(box, "Phone")
+        email = self.field(box, "Email")
+        password = self.field(box, "Password", True)
+
+        def add():
+            if not all([
+                name.get().strip(),
+                specialization.get().strip(),
+                phone.get().strip(),
+                email.get().strip(),
+                password.get()
+            ]):
+                messagebox.showerror(
+                    "Error",
+                    "Please complete all fields."
+                )
+                return
+
+            try:
+                con = self.connect()
+
+                con.execute("""
+                    INSERT INTO doctors
+                    (name, specialization, phone, email,
+                     password, hospital_id, status, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, 'approved', ?)
+                """, (
+                    name.get().strip(),
+                    specialization.get().strip(),
+                    phone.get().strip(),
+                    email.get().strip(),
+                    hash_password(password.get()),
+                    self.current_user["hospital_id"],
+                    datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                ))
+
+                con.commit()
+                con.close()
+
+                messagebox.showinfo(
+                    "Success",
+                    "Doctor added successfully."
+                )
+
+                self.hospital_doctors()
+
+            except sqlite3.IntegrityError:
+                messagebox.showerror(
+                    "Error",
+                    "Doctor email already exists."
+                )
+            except sqlite3.Error as e:
+                messagebox.showerror("Error", str(e))
+
+        self.button(
+            box,
+            "Add Doctor",
+            add,
+            self.c("green"),
+            18
+        ).pack(pady=25)
+
+        con = self.connect()
+
+        rows = con.execute("""
+            SELECT doctor_id, name, specialization, phone, email
+            FROM doctors
+            WHERE hospital_id = ?
+        """, (self.current_user["hospital_id"],)).fetchall()
+
+        con.close()
+
+        tree = self.table(
+            page,
+            ("ID", "Name", "Specialization", "Phone", "Email"),
+            [tuple(r) for r in rows]
+        )
+
+        def delete():
+            selected = tree.selection()
+
+            if not selected:
+                messagebox.showwarning(
+                    "Select Doctor",
+                    "Please select a doctor."
+                )
+                return
+
+            doctor_id = tree.item(
+                selected[0],
+                "values"
+            )[0]
+
+            if not messagebox.askyesno(
+                "Confirm",
+                "Delete this doctor?"
+            ):
+                return
+
+            try:
+                con = self.connect()
+
+                con.execute(
+                    "DELETE FROM doctors WHERE doctor_id = ?",
+                    (doctor_id,)
+                )
+
+                con.commit()
+                con.close()
+
+                self.hospital_doctors()
+
+            except sqlite3.Error as e:
+                messagebox.showerror("Error", str(e))
+
+        self.button(
+            page,
+            "Delete Selected Doctor",
+            delete,
+            self.c("danger"),
+            23
+        ).pack(pady=10)
+
+    def hospital_appointments(self):
+        self.clear()
+        self.current_view = self.hospital_appointments
+
+        page = self.make_scrollable()
+        self.header(page, self.hospital_dashboard)
+
+        self.title_label(page, "Hospital Appointments")
+
+        con = self.connect()
+
+        rows = con.execute("""
+            SELECT
+                a.appointment_id,
+                p.name,
+                d.name,
+                a.appointment_date,
+                a.appointment_time,
+                a.reason,
+                a.status
+            FROM appointments a
+            JOIN patients p ON a.patient_id = p.patient_id
+            JOIN doctors d ON a.doctor_id = d.doctor_id
+            WHERE a.hospital_id = ?
+            ORDER BY a.appointment_date DESC
+        """, (self.current_user["hospital_id"],)).fetchall()
+
+        con.close()
+
+        self.table(
+            page,
+            ("ID", "Patient", "Doctor", "Date", "Time", "Reason", "Status"),
+            [tuple(r) for r in rows]
+        )
+
+    def hospital_register(self):
+        self.clear()
+        self.current_view = self.hospital_register
+
+        page = self.make_scrollable()
+        self.header(page, self.hospital_login)
+
+        self.title_label(page, "Hospital Registration Request")
+
+        box = tk.Frame(
+            page,
+            bg=self.c("card"),
+            highlightbackground=self.c("border"),
+            highlightthickness=1
+        )
+        box.pack(fill="x", padx=250, pady=20)
+
+        name = self.field(box, "Hospital Name")
+        address = self.field(box, "Address")
+        phone = self.field(box, "Phone")
+        email = self.field(box, "Email")
+        password = self.field(box, "Password", True)
+        confirm = self.field(box, "Confirm Password", True)
+
+        def submit():
+            if not all([
+                name.get().strip(),
+                address.get().strip(),
+                phone.get().strip(),
+                email.get().strip(),
+                password.get()
+            ]):
+                messagebox.showerror(
+                    "Error",
+                    "Please complete all fields."
+                )
+                return
+
+            if password.get() != confirm.get():
+                messagebox.showerror(
+                    "Password",
+                    "Passwords do not match."
+                )
+                return
+
+            try:
+                con = self.connect()
+
+                con.execute("""
+                    INSERT INTO hospital_requests
+                    (name, address, phone, email, password,
+                     status, created_at)
+                    VALUES (?, ?, ?, ?, ?, 'Pending', ?)
+                """, (
+                    name.get().strip(),
+                    address.get().strip(),
+                    phone.get().strip(),
+                    email.get().strip(),
+                    hash_password(password.get()),
+                    datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                ))
+
+                con.commit()
+                con.close()
+
+                messagebox.showinfo(
+                    "Request Submitted",
+                    "Your hospital registration request has been submitted.\n\n"
+                    "Please wait for administrator approval."
+                )
+
+                self.hospital_login()
+
+            except sqlite3.IntegrityError:
+                messagebox.showerror(
+                    "Already Exists",
+                    "This hospital or email already has a registration."
+                )
+            except sqlite3.Error as e:
+                messagebox.showerror("Error", str(e))
+
+        self.button(
+            box,
+            "Submit Registration",
+            submit,
+            self.c("green"),
+            23
+        ).pack(pady=30)
+
+    def admin_dashboard(self):
+        self.clear()
+        self.current_view = self.admin_dashboard
+
+        page = self.make_scrollable()
+        self.header(page)
+
+        tk.Label(
+            page,
+            text="Administrator Dashboard",
+            bg=self.c("bg"),
+            fg=self.c("text"),
+            font=("Segoe UI", 30, "bold")
+        ).pack(pady=(45, 5))
+
+        tk.Label(
+            page,
+            text="Manage the Ethio Dream hospital network.",
+            bg=self.c("bg"),
+            fg=self.c("muted"),
+            font=("Segoe UI", 13)
+        ).pack()
+
+        con = self.connect()
+
+        patients = con.execute(
+            "SELECT COUNT(*) AS total FROM patients"
+        ).fetchone()["total"]
+
+        doctors = con.execute(
+            "SELECT COUNT(*) AS total FROM doctors"
+        ).fetchone()["total"]
+
+        hospitals = con.execute(
+            "SELECT COUNT(*) AS total FROM hospitals"
+        ).fetchone()["total"]
+
+        pending = con.execute("""
+            SELECT COUNT(*) AS total
+            FROM hospital_requests
+            WHERE status = 'Pending'
+        """).fetchone()["total"]
+
+        con.close()
+
+        stats = tk.Frame(page, bg=self.c("bg"))
+        stats.pack(fill="x", padx=100, pady=35)
+
+        for i in range(4):
+            stats.columnconfigure(i, weight=1)
+
+        stat_data = [
+            ("Patients", patients, self.c("blue")),
+            ("Doctors", doctors, self.c("green")),
+            ("Hospitals", hospitals, self.c("purple")),
+            ("Pending Requests", pending, self.c("danger"))
+        ]
+
+        for i, (label, number, color) in enumerate(stat_data):
+            box = tk.Frame(
+                stats,
+                bg=self.c("card"),
+                highlightbackground=self.c("border"),
+                highlightthickness=1
+            )
+            box.grid(
+                row=0,
+                column=i,
+                padx=8,
+                sticky="nsew"
+            )
+
+            tk.Label(
+                box,
+                text=str(number),
+                bg=self.c("card"),
+                fg=color,
+                font=("Segoe UI", 28, "bold")
+            ).pack(pady=(20, 3))
+
+            tk.Label(
+                box,
+                text=label,
+                bg=self.c("card"),
+                fg=self.c("muted"),
+                font=("Segoe UI", 10, "bold")
+            ).pack(pady=(0, 20))
+
+        actions = tk.Frame(page, bg=self.c("bg"))
+        actions.pack(pady=20)
+
+        self.button(
+            actions,
+            "🏥 Hospitals",
+            self.admin_hospitals,
+            self.c("blue"),
+            18
+        ).pack(side="left", padx=6)
+
+        self.button(
+            actions,
+            "🩺 Doctors",
+            self.admin_doctors,
+            self.c("green"),
+            18
+        ).pack(side="left", padx=6)
+
+        self.button(
+            actions,
+            "👤 Patients",
+            self.admin_patients,
+            self.c("purple"),
+            18
+        ).pack(side="left", padx=6)
+
+        self.button(
+            actions,
+            "📨 Hospital Requests",
+            self.admin_requests,
+            self.c("danger"),
+            20
+        ).pack(side="left", padx=6)
+
+        self.button(
+            page,
+            "Logout",
+            self.logout,
+            self.c("danger"),
+            16
+        ).pack(pady=30)
+
+    def admin_hospitals(self):
+        self.clear()
+        self.current_view = self.admin_hospitals
+
+        page = self.make_scrollable()
+        self.header(page, self.admin_dashboard)
+
+        self.title_label(page, "Hospitals")
+
+        con = self.connect()
+
+        rows = con.execute("""
+            SELECT
+                hospital_id,
+                name,
+                address,
+                phone,
+                email,
+                status
+            FROM hospitals
+            ORDER BY name
+        """).fetchall()
+
+        con.close()
+
+        self.table(
+            page,
+            ("ID", "Name", "Address", "Phone", "Email", "Status"),
+            [tuple(r) for r in rows]
+        )
+
+    def admin_doctors(self):
+        self.clear()
+        self.current_view = self.admin_doctors
+
+        page = self.make_scrollable()
+        self.header(page, self.admin_dashboard)
+
+        self.title_label(page, "Doctors")
+
+        con = self.connect()
+
+        rows = con.execute("""
+            SELECT
+                d.doctor_id,
+                d.name,
+                d.specialization,
+                h.name,
+                d.phone,
+                d.email,
+                d.status
+            FROM doctors d
+            LEFT JOIN hospitals h
+                ON d.hospital_id = h.hospital_id
+            ORDER BY d.name
+        """).fetchall()
+
+        con.close()
+
+        self.table(
+            page,
+            (
+                "ID",
+                "Doctor",
+                "Specialization",
+                "Hospital",
+                "Phone",
+                "Email",
+                "Status"
+            ),
+            [tuple(r) for r in rows]
+        )
+
+    def admin_patients(self):
+        self.clear()
+        self.current_view = self.admin_patients
+
+        page = self.make_scrollable()
+        self.header(page, self.admin_dashboard)
+
+        self.title_label(page, "Patients")
+
+        con = self.connect()
+
+        rows = con.execute("""
+            SELECT
+                patient_id,
+                name,
+                age,
+                gender,
+                phone,
+                email,
+                address
+            FROM patients
+            ORDER BY patient_id DESC
+        """).fetchall()
+
+        con.close()
+
+        tree = self.table(
+            page,
+            (
+                "ID",
+                "Name",
+                "Age",
+                "Gender",
+                "Phone",
+                "Email",
+                "Address"
+            ),
+            [tuple(r) for r in rows]
+        )
+
+        def delete_patient():
+            selected = tree.selection()
+
+            if not selected:
+                messagebox.showwarning(
+                    "Select Patient",
+                    "Please select a patient."
+                )
+                return
+
+            patient_id = tree.item(
+                selected[0],
+                "values"
+            )[0]
+
+            if not messagebox.askyesno(
+                "Confirm Delete",
+                "Delete this patient and their records?"
+            ):
+                return
+
+            try:
+                con = self.connect()
+
+                con.execute(
+                    "DELETE FROM patients WHERE patient_id = ?",
+                    (patient_id,)
+                )
+
+                con.commit()
+                con.close()
+
+                messagebox.showinfo(
+                    "Deleted",
+                    "Patient deleted successfully."
+                )
+
+                self.admin_patients()
+
+            except sqlite3.Error as e:
+                messagebox.showerror(
+                    "Error",
+                    str(e)
+                )
+
+        self.button(
+            page,
+            "Delete Selected Patient",
+            delete_patient,
+            self.c("danger"),
+            25
+        ).pack(pady=15)
+
+    def admin_requests(self):
+        self.clear()
+        self.current_view = self.admin_requests
+
+        page = self.make_scrollable()
+        self.header(page, self.admin_dashboard)
+
+        self.title_label(page, "Hospital Registration Requests")
+
+        con = self.connect()
+
+        rows = con.execute("""
+            SELECT
+                request_id,
+                name,
+                address,
+                phone,
+                email,
+                status,
+                created_at
+            FROM hospital_requests
+            ORDER BY request_id DESC
+        """).fetchall()
+
+        con.close()
+
+        tree = self.table(
+            page,
+            (
+                "ID",
+                "Hospital",
+                "Address",
+                "Phone",
+                "Email",
+                "Status",
+                "Date"
+            ),
+            [tuple(r) for r in rows]
+        )
+
+        controls = tk.Frame(page, bg=self.c("bg"))
+        controls.pack(pady=15)
+
+        def process_request(action):
+            selected = tree.selection()
+
+            if not selected:
+                messagebox.showwarning(
+                    "Select Request",
+                    "Please select a request."
+                )
+                return
+
+            values = tree.item(
+                selected[0],
+                "values"
+            )
+
+            request_id = values[0]
+
+            con = self.connect()
+
+            request = con.execute("""
+                SELECT *
+                FROM hospital_requests
+                WHERE request_id = ?
+            """, (request_id,)).fetchone()
+
+            if not request:
+                con.close()
+                return
+
+            if action == "approve":
+                try:
+                    con.execute("""
+                        INSERT OR IGNORE INTO hospitals
+                        (name, address, phone, email, password,
+                         status, created_at)
+                        VALUES (?, ?, ?, ?, ?, 'approved', ?)
+                    """, (
+                        request["name"],
+                        request["address"],
+                        request["phone"],
+                        request["email"],
+                        request["password"],
+                        datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    ))
+
+                    con.execute("""
+                        UPDATE hospital_requests
+                        SET status = 'Approved'
+                        WHERE request_id = ?
+                    """, (request_id,))
+
+                    con.commit()
+                    con.close()
+
+                    messagebox.showinfo(
+                        "Approved",
+                        "Hospital has been approved."
+                    )
+
+                    self.admin_requests()
+
+                except sqlite3.Error as e:
+                    con.close()
+                    messagebox.showerror(
+                        "Error",
+                        str(e)
+                    )
+
+            else:
+                con.execute("""
+                    UPDATE hospital_requests
+                    SET status = 'Rejected'
+                    WHERE request_id = ?
+                """, (request_id,))
+
+                con.commit()
+                con.close()
+
+                messagebox.showinfo(
+                    "Rejected",
+                    "Hospital request rejected."
+                )
+
+                self.admin_requests()
+
+        self.button(
+            controls,
+            "✓ Approve",
+            lambda: process_request("approve"),
+            self.c("green"),
+            15
+        ).pack(side="left", padx=5)
+
+        self.button(
+            controls,
+            "✕ Reject",
+            lambda: process_request("reject"),
+            self.c("danger"),
+            15
+        ).pack(side="left", padx=5)
+
+    def public_hospitals(self):
+        self.clear()
+        self.current_view = self.public_hospitals
+
+        page = self.make_scrollable()
+        self.header(
+            page,
+            self.current_view_back
+        )
+
+        self.title_label(page, "Our Hospitals")
+
+        con = self.connect()
+
+        hospitals = con.execute("""
+            SELECT *
+            FROM hospitals
+            WHERE status = 'approved'
+            ORDER BY name
+        """).fetchall()
+
+        for hospital in hospitals:
+            box = tk.Frame(
+                page,
+                bg=self.c("card"),
+                highlightbackground=self.c("border"),
+                highlightthickness=1
+            )
+            box.pack(fill="x", padx=150, pady=10)
+
+            tk.Label(
+                box,
+                text="🏥",
+                bg=self.c("card"),
+                fg=self.c("blue"),
+                font=("Segoe UI", 38)
+            ).pack(side="left", padx=25, pady=20)
+
+            info = tk.Frame(box, bg=self.c("card"))
+            info.pack(side="left", fill="x", expand=True, pady=20)
+
+            tk.Label(
+                info,
+                text=hospital["name"],
+                bg=self.c("card"),
+                fg=self.c("text"),
+                font=("Segoe UI", 17, "bold")
+            ).pack(anchor="w")
+
+            tk.Label(
+                info,
+                text=f"📍 {hospital['address']}    ☎ {hospital['phone']}",
+                bg=self.c("card"),
+                fg=self.c("muted"),
+                font=("Segoe UI", 10)
+            ).pack(anchor="w", pady=5)
+
+            doctors = con.execute("""
+                SELECT name, specialization
+                FROM doctors
+                WHERE hospital_id = ?
+                AND status = 'approved'
+            """, (hospital["hospital_id"],)).fetchall()
+
+            doctor_text = "Doctors: " + (
+                ", ".join(
+                    f"{d['name']} ({d['specialization']})"
+                    for d in doctors
+                )
+                if doctors
+                else "No doctors registered yet"
+            )
+
+            tk.Label(
+                info,
+                text=doctor_text,
+                bg=self.c("card"),
+                fg=self.c("text"),
+                font=("Segoe UI", 10),
+                wraplength=800,
+                justify="left"
+            ).pack(anchor="w")
+
+        con.close()
+
+    def medicine_search(self):
+        self.clear()
+        self.current_view = self.medicine_search
+
+        page = self.make_scrollable()
+        self.header(page, self.current_view_back)
+
+        self.title_label(page, "Medicine Search")
+
+        box = tk.Frame(
+            page,
+            bg=self.c("card"),
+            highlightbackground=self.c("border"),
+            highlightthickness=1
+        )
+        box.pack(fill="x", padx=250, pady=20)
+
+        search = self.field(
+            box,
+            "Search medicine"
+        )
+
+        results_frame = tk.Frame(
+            page,
+            bg=self.c("bg")
+        )
+        results_frame.pack(fill="x", padx=180, pady=20)
+
+        def search_medicine():
+            for w in results_frame.winfo_children():
+                w.destroy()
+
+            query = search.get().strip()
+
+            if not query:
+                messagebox.showwarning(
+                    "Search",
+                    "Enter a medicine name."
+                )
+                return
+
+            con = self.connect()
+
+            rows = con.execute("""
+                SELECT name, category, description
+                FROM medicines
+                WHERE name LIKE ?
+                OR category LIKE ?
+                OR description LIKE ?
+                ORDER BY name
+            """, (
+                f"%{query}%",
+                f"%{query}%",
+                f"%{query}%"
+            )).fetchall()
+
+            con.close()
+
+            if not rows:
+                tk.Label(
+                    results_frame,
+                    text="No medicine found.",
+                    bg=self.c("bg"),
+                    fg=self.c("muted"),
+                    font=("Segoe UI", 13)
+                ).pack(pady=30)
+                return
+
+            for medicine in rows:
+                card = tk.Frame(
+                    results_frame,
+                    bg=self.c("card"),
+                    highlightbackground=self.c("border"),
+                    highlightthickness=1
+                )
+                card.pack(fill="x", pady=8)
+
+                tk.Label(
+                    card,
+                    text="💊",
+                    bg=self.c("card"),
+                    fg=self.c("green"),
+                    font=("Segoe UI", 30)
+                ).pack(side="left", padx=25, pady=20)
+
+                info = tk.Frame(card, bg=self.c("card"))
+                info.pack(side="left", fill="x", expand=True, pady=20)
+
+                tk.Label(
+                    info,
+                    text=medicine["name"],
+                    bg=self.c("card"),
+                    fg=self.c("text"),
+                    font=("Segoe UI", 16, "bold")
+                ).pack(anchor="w")
+
+                tk.Label(
+                    info,
+                    text=medicine["category"],
+                    bg=self.c("card"),
+                    fg=self.c("green"),
+                    font=("Segoe UI", 10, "bold")
+                ).pack(anchor="w")
+
+                tk.Label(
+                    info,
+                    text=medicine["description"],
+                    bg=self.c("card"),
+                    fg=self.c("muted"),
+                    font=("Segoe UI", 10),
+                    wraplength=750,
+                    justify="left"
+                ).pack(anchor="w", pady=5)
+
+        self.button(
+            box,
+            "Search",
+            search_medicine,
+            self.c("blue"),
+            15
+        ).pack(pady=25)
+
+        tk.Label(
+            page,
+            text="Example: search for “pain reliever”",
+            bg=self.c("bg"),
+            fg=self.c("muted"),
+            font=("Segoe UI", 10)
+        ).pack()
+
+    def current_view_back(self):
+        if self.current_role == "patient":
+            self.patient_dashboard()
+        elif self.current_role == "doctor":
+            self.doctor_dashboard()
+        elif self.current_role == "hospital":
+            self.hospital_dashboard()
+        elif self.current_role == "admin":
+            self.admin_dashboard()
+        else:
+            self.show_home()
+
+    def logout(self):
+        self.current_user = None
+        self.current_role = None
+        self.show_home()
+
+
+if __name__ == "__main__":
+    app = HospitalApp()
+    app.mainloop()

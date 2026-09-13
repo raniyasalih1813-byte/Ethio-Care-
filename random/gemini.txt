@@ -1,0 +1,366 @@
+import os
+from flask import Flask, render_template_string, request, redirect, url_for, flash
+from flask_sqlalchemy import SQLAlchemy
+from flask_login import LoginManager, UserMixin, login_user, logout_user, login_required, current_user
+from werkzeug.security import generate_password_hash, check_password_hash
+from werkzeug.utils import secure_filename
+import re
+
+app = Flask(__name__)
+app.config['SECRET_KEY'] = 'ethio-emergency-secret-key-2026'
+app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///emergency_system.db'
+app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+app.config['UPLOAD_FOLDER'] = os.path.join('static', 'uploads')
+
+# Ensure upload directory exists
+os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
+
+db = SQLAlchemy(app)
+login_manager = LoginManager(app)
+login_manager.login_view = 'login'
+
+# Database Models
+class User(UserMixin, db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    username = db.Column(db.String(50), unique=True, nullable=False)
+    password_hash = db.Column(db.String(255), nullable=False)
+    role = db.Column(db.String(20), nullable=False, default='user') # 'admin' or 'user'
+
+class Incident(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    incident_type = db.Column(db.String(50), nullable=False)
+    location = db.Column(db.String(200), nullable=False)
+    phone = db.Column(db.String(20), nullable=False)
+    description = db.Column(db.Text, nullable=True)
+    image_file = db.Column(db.String(100), nullable=True)
+    status = db.Column(db.String(20), nullable=False, default='Pending')
+
+@login_manager.user_loader
+def load_user(user_id):
+    return User.query.get(int(user_id))
+
+# HTML Template with Embedded CSS/JS
+HTML_TEMPLATE = """
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Ethiopia Emergency Management System</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <style>
+        body { background-color: #0f172a; color: #f8fafc; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
+        .navbar { background-color: #1e293b !important; border-bottom: 1px solid #334155; }
+        .hero-section {
+            background: linear-gradient(rgba(15, 23, 42, 0.75), rgba(15, 23, 42, 0.9)), 
+                        url('https://images.unsplash.com/photo-1516841207069-3a699c8516f1?auto=format&fit=crop&w=1200&q=80') center/cover;
+            border-radius: 12px; padding: 40px; text-align: center; margin-bottom: 30px; border: 1px solid #334155;
+        }
+        .hotline-card { background-color: #1e293b; border: 1px solid #334155; border-radius: 10px; padding: 15px; text-align: center; }
+        .hotline-num { font-size: 1.5rem; font-weight: bold; color: #38bdf8; }
+        .card-custom { background-color: #1e293b; border: 1px solid #334155; border-radius: 12px; }
+        .form-control, .form-select { background-color: #0f172a; border: 1px solid #334155; color: #f8fafc; }
+        .form-control:focus, .form-select:focus { background-color: #0f172a; color: #f8fafc; border-color: #38bdf8; box-shadow: none; }
+        .badge-pending { background-color: #f59e0b; }
+        .badge-dispatched { background-color: #38bdf8; color: #000; }
+        .badge-resolved { background-color: #22c55e; }
+        .img-thumb { width: 60px; height: 60px; object-fit: cover; border-radius: 6px; }
+    </style>
+</head>
+<body>
+
+    <nav class="navbar navbar-expand-lg navbar-dark px-4">
+        <a class="navbar-brand fw-bold text-danger" href="#">🚨 ETHIO-DISPATCH</a>
+        <div class="ms-auto">
+            {% if current_user.is_authenticated %}
+                <span class="me-3 text-info fw-semibold">{{ current_user.username.upper() }} ({{ current_user.role }})</span>
+                <a href="{{ url_for('logout') }}" class="btn btn-outline-danger btn-sm">Logout</a>
+            {% else %}
+                <a href="{{ url_for('login') }}" class="btn btn-outline-primary btn-sm">Login</a>
+            {% endif %}
+        </div>
+    </nav>
+
+    <div class="container my-4">
+
+        {% with messages = get_flashed_messages(with_categories=true) %}
+            {% if messages %}
+                {% for category, message in messages %}
+                    <div class="alert alert-{{ category }} alert-dismissible fade show" role="alert">
+                        {{ message }}
+                        <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+                    </div>
+                {% endfor %}
+            {% endif %}
+        {% endwith %}
+
+        <div class="hero-section">
+            <h1 class="display-5 fw-bold text-danger">National Emergency Incident Portal</h1>
+            <p class="lead text-info">Real-time Emergency Reporting & Response Coordination System</p>
+        </div>
+
+        <div class="row g-3 mb-4">
+            <div class="col-md-3">
+                <div class="hotline-card">
+                    <div>🚓 Police Emergency</div>
+                    <div class="hotline-num">991</div>
+                </div>
+            </div>
+            <div class="col-md-3">
+                <div class="hotline-card">
+                    <div>🚑 Ambulance Service</div>
+                    <div class="hotline-num">907</div>
+                </div>
+            </div>
+            <div class="col-md-3">
+                <div class="hotline-card">
+                    <div>🚒 Fire & Rescue</div>
+                    <div class="hotline-num">939</div>
+                </div>
+            </div>
+            <div class="col-md-3">
+                <div class="hotline-card">
+                    <div>🛡️ Traffic Police</div>
+                    <div class="hotline-num">945</div>
+                </div>
+            </div>
+        </div>
+
+        {% if page == 'report' %}
+        <div class="card card-custom p-4">
+            <h3 class="mb-3 text-warning">Report Emergency Incident</h3>
+            <form action="{{ url_for('report_incident') }}" method="POST" enctype="multipart/form-data">
+                <div class="mb-3">
+                    <label class="form-label">Incident Type *</label>
+                    <select class="form-select" name="incident_type" required>
+                        <option value="">Select Type</option>
+                        <option value="Medical">Medical Emergency</option>
+                        <option value="Fire">Fire Incident</option>
+                        <option value="Crime">Crime / Robbery</option>
+                        <option value="Accident">Traffic Accident</option>
+                    </select>
+                </div>
+                <div class="mb-3">
+                    <label class="form-label">Location / Address *</label>
+                    <input type="text" class="form-control" name="location" placeholder="e.g., Addis Ababa, Bole Sub-City" required>
+                </div>
+                <div class="mb-3">
+                    <label class="form-label">Reporter Phone Number *</label>
+                    <input type="text" class="form-control" name="phone" placeholder="e.g., 0911234567 or +251911234567" required>
+                </div>
+                <div class="mb-3">
+                    <label class="form-label">Description</label>
+                    <textarea class="form-control" name="description" rows="3" placeholder="Provide extra details..."></textarea>
+                </div>
+                <div class="mb-3">
+                    <label class="form-label">Attach Scene Photo</label>
+                    <input type="file" class="form-control" name="image" accept="image/*">
+                </div>
+                <button type="submit" class="btn btn-danger w-100 fw-bold">Submit Report</button>
+            </form>
+        </div>
+
+        {% elif page == 'login' %}
+        <div class="row justify-content-center">
+            <div class="col-md-5">
+                <div class="card card-custom p-4">
+                    <h3 class="mb-3 text-center">System Login</h3>
+                    <form action="{{ url_for('login') }}" method="POST">
+                        <div class="mb-3">
+                            <label class="form-label">Username</label>
+                            <input type="text" class="form-control" name="username" required>
+                        </div>
+                        <div class="mb-3">
+                            <label class="form-label">Password</label>
+                            <input type="password" class="form-control" name="password" required>
+                        </div>
+                        <button type="submit" class="btn btn-primary w-100 fw-bold">Login</button>
+                    </form>
+                    <div class="mt-3 text-center text-muted">
+                        <small>Default Admin: <strong>admin</strong> / <strong>admin123</strong></small><br>
+                        <small>Default User: <strong>user</strong> / <strong>user123</strong></small>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        {% elif page == 'admin' %}
+        <div class="card card-custom p-4">
+            <h3 class="mb-3 text-info">Live Emergency Control Panel</h3>
+            <div class="table-responsive">
+                <table class="table table-dark table-hover align-middle">
+                    <thead>
+                        <tr>
+                            <th>ID</th>
+                            <th>Photo</th>
+                            <th>Type</th>
+                            <th>Location</th>
+                            <th>Phone</th>
+                            <th>Status</th>
+                            <th>Update Status</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for inc in incidents %}
+                        <tr>
+                            <td>#{{ inc.id }}</td>
+                            <td>
+                                {% if inc.image_file %}
+                                    <img src="{{ url_for('static', filename='uploads/' + inc.image_file) }}" class="img-thumb">
+                                {% else %}
+                                    <span class="text-muted">No Image</span>
+                                {% endif %}
+                            </td>
+                            <td>{{ inc.incident_type }}</td>
+                            <td>{{ inc.location }}</td>
+                            <td>{{ inc.phone }}</td>
+                            <td>
+                                <span class="badge 
+                                    {% if inc.status == 'Pending' %}badge-pending
+                                    {% elif inc.status == 'Dispatched' %}badge-dispatched
+                                    {% else %}badge-resolved{% endif %}">
+                                    {{ inc.status }}
+                                </span>
+                            </td>
+                            <td>
+                                <form action="{{ url_for('update_status', incident_id=inc.id) }}" method="POST" class="d-flex gap-2">
+                                    <select name="status" class="form-select form-select-sm">
+                                        <option value="Pending" {% if inc.status == 'Pending' %}selected{% endif %}>Pending</option>
+                                        <option value="Dispatched" {% if inc.status == 'Dispatched' %}selected{% endif %}>Dispatched</option>
+                                        <option value="Resolved" {% if inc.status == 'Resolved' %}selected{% endif %}>Resolved</option>
+                                    </select>
+                                    <button type="submit" class="btn btn-sm btn-outline-info">Save</button>
+                                </form>
+                            </td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+        {% endif %}
+
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+</body>
+</html>
+"""
+
+# Routes
+@app.route('/')
+def index():
+    if current_user.is_authenticated and current_user.role == 'admin':
+        return redirect(url_for('admin_dashboard'))
+    return render_template_string(HTML_TEMPLATE, page='report')
+
+@app.route('/report', methods=['POST'])
+def report_incident():
+    incident_type = request.form.get('incident_type')
+    location = request.form.get('location', '').strip()
+    phone = request.form.get('phone', '').strip()
+    description = request.form.get('description', '').strip()
+    file = request.files.get('image')
+
+    # Input Validation
+    phone_pattern = r'^(?:\+251|0)?9\d{8}$|^(?:\+251|0)?7\d{8}$'
+    
+    if not incident_type or len(location) < 5 or not re.match(phone_pattern, phone):
+        flash('INVALID INPUT: Check phone format (e.g., 0911234567) and location details!', 'danger')
+        return redirect(url_for('index'))
+
+    # Image Upload Handling
+    filename = None
+    if file and file.filename != '':
+        filename = secure_filename(file.filename)
+        file.save(os.path.join(app.config['UPLOAD_FOLDER'], filename))
+
+    new_incident = Incident(
+        incident_type=incident_type,
+        location=location,
+        phone=phone,
+        description=description,
+        image_file=filename
+    )
+    
+    db.session.add(new_incident)
+    db.session.commit()
+
+    flash('Emergency incident reported successfully!', 'success')
+    return redirect(url_for('index'))
+
+@app.route('/login', methods=['GET', 'POST'])
+def login():
+    if request.method == 'POST':
+        username = request.form.get('username')
+        password = request.form.get('password')
+        user = User.query.filter_by(username=username).first()
+
+        if user and check_password_hash(user.password_hash, password):
+            login_user(user)
+            flash('Logged in successfully!', 'success')
+            if user.role == 'admin':
+                return redirect(url_for('admin_dashboard'))
+            return redirect(url_for('index'))
+        else:
+            flash('INVALID: Incorrect username or password!', 'danger')
+
+    return render_template_string(HTML_TEMPLATE, page='login')
+
+@app.route('/logout')
+@login_required
+def logout():
+    logout_user()
+    flash('Logged out successfully.', 'info')
+    return redirect(url_for('index'))
+
+@app.route('/admin')
+@login_required
+def admin_dashboard():
+    if current_user.role != 'admin':
+        flash('Access denied: Admins only!', 'danger')
+        return redirect(url_for('index'))
+
+    incidents = Incident.query.order_by(Incident.id.desc()).all()
+    return render_template_string(HTML_TEMPLATE, page='admin', incidents=incidents)
+
+@app.route('/admin/status/<int:incident_id>', methods=['POST'])
+@login_required
+def update_status(incident_id):
+    if current_user.role != 'admin':
+        return redirect(url_for('index'))
+
+    incident = Incident.query.get_or_404(incident_id)
+    new_status = request.form.get('status')
+    if new_status in ['Pending', 'Dispatched', 'Resolved']:
+        incident.status = new_status
+        db.session.commit()
+        flash(f'Status updated for Incident #{incident_id}', 'success')
+
+    return redirect(url_for('admin_dashboard'))
+
+# Application Setup & Seeding
+if __name__ == '__main__':
+    with app.app_context():
+        db.create_all()
+        # Seed initial default admin and regular user if they don't exist
+        if not User.query.filter_by(username='admin').first():
+            admin_user = User(
+                username='admin',
+                password_hash=generate_password_hash('admin123'),
+                role='admin'
+            )
+            db.session.add(admin_user)
+
+        if not User.query.filter_by(username='user').first():
+            normal_user = User(
+                username='user',
+                password_hash=generate_password_hash('user123'),
+                role='user'
+            )
+            db.session.add(normal_user)
+
+        db.session.commit()
+
+    print("Server running at http://127.0.0.1:5000/")
+    app.run(debug=True)

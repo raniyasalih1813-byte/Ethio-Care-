@@ -1,0 +1,3460 @@
+import tkinter as tk
+from tkinter import ttk, messagebox
+import sqlite3
+import hashlib
+import re
+import threading
+import urllib.request
+from datetime import datetime
+from io import BytesIO
+from queue import Queue, Empty
+
+try:
+    from PIL import Image, ImageTk
+    PIL_AVAILABLE = True
+except ImportError:
+    PIL_AVAILABLE = False
+
+
+DB_NAME = "emergency_management.db"
+
+COLORS = {
+    "bg": "#0b1220",
+    "panel": "#111c2e",
+    "panel2": "#16243a",
+    "primary": "#1976d2",
+    "primary_dark": "#125aa0",
+    "danger": "#e53935",
+    "danger_dark": "#b71c1c",
+    "success": "#2e7d32",
+    "warning": "#f9a825",
+    "text": "#ffffff",
+    "muted": "#aebbd0",
+    "border": "#2b3c56",
+    "input": "#0f1a2b",
+    "card": "#142238",
+}
+
+IMAGE_URLS = {
+    "fire": "https://images.unsplash.com/photo-1483347756197-71ef80e95f73?w=1200",
+    "medical": "https://images.unsplash.com/photo-1584982751601-97dcc096659c?w=1200",
+    "police": "https://images.unsplash.com/photo-1450101499163-c8848c66ca85?w=1200",
+    "rescue": "https://images.unsplash.com/photo-1504593811423-6dd665756598?w=1200",
+    "ambulance": "https://images.unsplash.com/photo-1587745416684-47953f16f02f?w=1200",
+    "flood": "https://images.unsplash.com/photo-1547683905-f686c993aae5?w=1200",
+}
+
+SERVICE_DATA = [
+    ("Fire", "Fire & Rescue", "Fire emergency response and rescue services.", "939", "fire"),
+    ("Medical", "Medical Emergency", "Emergency medical assistance and response.", "907", "medical"),
+    ("Police", "Police Emergency", "Police emergency and public safety response.", "991", "police"),
+    ("Rescue", "Emergency Rescue", "Emergency rescue and disaster response.", "939", "rescue"),
+    ("Ambulance", "Ambulance Service", "Emergency ambulance transportation and care.", "907", "ambulance"),
+    ("Flood", "Flood Emergency", "Flood response and emergency assistance.", "939", "flood"),
+]
+
+CONTACT_DATA = [
+    ("Federal Police", "Police", "991", "Addis Ababa, Ethiopia"),
+    ("Fire & Emergency", "Fire", "939", "Addis Ababa, Ethiopia"),
+    ("Emergency Medical", "Medical", "907", "Addis Ababa, Ethiopia"),
+    ("Red Cross", "Medical", "+251 11 467 2195", "Addis Ababa, Ethiopia"),
+    ("Emergency Contact - France", "International", "+33 112", "France"),
+    ("Emergency Contact - UK", "International", "+44 999", "United Kingdom"),
+    ("Emergency Contact - USA", "International", "+1 911", "United States"),
+    ("Emergency Contact - UAE", "International", "+971 999", "United Arab Emirates"),
+]
+
+
+class Database:
+    def __init__(self, db_name=DB_NAME):
+        self.db_name = db_name
+        self.initialize()
+
+    def connect(self):
+        conn = sqlite3.connect(self.db_name)
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    def execute(self, query, params=()):
+        conn = self.connect()
+        try:
+            cursor = conn.cursor()
+            cursor.execute(query, params)
+            conn.commit()
+            return cursor.lastrowid
+        finally:
+            conn.close()
+
+    def fetchone(self, query, params=()):
+        conn = self.connect()
+        try:
+            cursor = conn.cursor()
+            cursor.execute(query, params)
+            return cursor.fetchone()
+        finally:
+            conn.close()
+
+    def fetchall(self, query, params=()):
+        conn = self.connect()
+        try:
+            cursor = conn.cursor()
+            cursor.execute(query, params)
+            return cursor.fetchall()
+        finally:
+            conn.close()
+
+    def table_exists(self, table_name):
+        row = self.fetchone(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+            (table_name,)
+        )
+        return row is not None
+
+    def columns(self, table_name):
+        if not self.table_exists(table_name):
+            return []
+        rows = self.fetchall(f"PRAGMA table_info({table_name})")
+        return [row["name"] for row in rows]
+
+    def initialize(self):
+        self.create_users()
+        self.create_administrators()
+        self.create_services()
+        self.create_contacts()
+        self.repair_reports_table()
+        self.seed_data()
+
+    def create_users(self):
+        self.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                username TEXT UNIQUE NOT NULL,
+                password TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+        """)
+
+    def create_administrators(self):
+        self.execute("""
+            CREATE TABLE IF NOT EXISTS administrators (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                username TEXT UNIQUE NOT NULL,
+                password TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+        """)
+
+    def create_services(self):
+        self.execute("""
+            CREATE TABLE IF NOT EXISTS emergency_services (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                category TEXT NOT NULL,
+                title TEXT NOT NULL,
+                description TEXT NOT NULL,
+                phone TEXT NOT NULL,
+                image_key TEXT,
+                created_at TEXT NOT NULL
+            )
+        """)
+
+    def create_contacts(self):
+        self.execute("""
+            CREATE TABLE IF NOT EXISTS emergency_contacts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                category TEXT NOT NULL,
+                phone TEXT NOT NULL,
+                address TEXT NOT NULL
+            )
+        """)
+
+    def create_reports_table(self):
+        self.execute("""
+            CREATE TABLE IF NOT EXISTS emergency_reports (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                username TEXT NOT NULL,
+                category TEXT NOT NULL,
+                title TEXT NOT NULL,
+                description TEXT NOT NULL,
+                phone TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+        """)
+
+    def repair_reports_table(self):
+        required = {
+            "id",
+            "username",
+            "category",
+            "title",
+            "description",
+            "phone",
+            "created_at"
+        }
+
+        if not self.table_exists("emergency_reports"):
+            self.create_reports_table()
+            return
+
+        current = set(self.columns("emergency_reports"))
+
+        if required.issubset(current):
+            return
+
+        old_table = "emergency_reports_old"
+
+        try:
+            self.execute("DROP TABLE IF EXISTS emergency_reports_old")
+            self.execute(
+                "ALTER TABLE emergency_reports RENAME TO emergency_reports_old"
+            )
+
+            self.create_reports_table()
+
+            old_columns = set(self.columns(old_table))
+            rows = self.fetchall(f"SELECT * FROM {old_table}")
+
+            for row in rows:
+                def get_value(names, default=""):
+                    for name in names:
+                        if name in old_columns:
+                            value = row[name]
+                            if value is not None and str(value).strip():
+                                return str(value)
+                    return default
+
+                username = get_value(
+                    ["username", "user", "user_name"],
+                    "Unknown"
+                )
+
+                category = get_value(
+                    ["category", "type"],
+                    "General"
+                )
+
+                title = get_value(
+                    ["title", "subject", "name"],
+                    "Emergency Report"
+                )
+
+                description = get_value(
+                    ["description", "message", "details"],
+                    ""
+                )
+
+                phone = get_value(
+                    ["phone", "phone_number"],
+                    ""
+                )
+
+                created_at = get_value(
+                    ["created_at", "date", "timestamp"],
+                    datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                )
+
+                self.execute("""
+                    INSERT INTO emergency_reports
+                    (username, category, title, description, phone, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                """, (
+                    username,
+                    category,
+                    title,
+                    description,
+                    phone,
+                    created_at
+                ))
+
+        except Exception:
+            try:
+                self.execute("DROP TABLE IF EXISTS emergency_reports")
+                self.create_reports_table()
+            except Exception:
+                pass
+
+    def hash_password(self, password):
+        return hashlib.sha256(
+            password.encode("utf-8")
+        ).hexdigest()
+
+    def seed_data(self):
+        admin = self.fetchone(
+            "SELECT id FROM administrators WHERE username=?",
+            ("admin",)
+        )
+
+        if not admin:
+            self.execute("""
+                INSERT INTO administrators
+                (username, password, created_at)
+                VALUES (?, ?, ?)
+            """, (
+                "admin",
+                self.hash_password("admin1234"),
+                datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            ))
+
+        service_count = self.fetchone(
+            "SELECT COUNT(*) AS count FROM emergency_services"
+        )
+
+        if service_count["count"] == 0:
+            for category, title, description, phone, image_key in SERVICE_DATA:
+                self.execute("""
+                    INSERT INTO emergency_services
+                    (category, title, description, phone, image_key, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                """, (
+                    category,
+                    title,
+                    description,
+                    phone,
+                    image_key,
+                    datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                ))
+
+        contact_count = self.fetchone(
+            "SELECT COUNT(*) AS count FROM emergency_contacts"
+        )
+
+        if contact_count["count"] == 0:
+            for name, category, phone, address in CONTACT_DATA:
+                self.execute("""
+                    INSERT INTO emergency_contacts
+                    (name, category, phone, address)
+                    VALUES (?, ?, ?, ?)
+                """, (
+                    name,
+                    category,
+                    phone,
+                    address
+                ))
+
+    def register_user(self, username, password):
+        username = username.strip()
+
+        if not username or not password:
+            return False, "Username and password are required."
+
+        if len(username) < 3:
+            return False, "Username must contain at least 3 characters."
+
+        if len(password) < 6:
+            return False, "Password must contain at least 6 characters."
+
+        if not re.match(r"^[A-Za-z0-9_.-]+$", username):
+            return False, "Username contains invalid characters."
+
+        existing = self.fetchone(
+            "SELECT id FROM users WHERE username=?",
+            (username,)
+        )
+
+        if existing:
+            return False, "Username already exists."
+
+        self.execute("""
+            INSERT INTO users
+            (username, password, created_at)
+            VALUES (?, ?, ?)
+        """, (
+            username,
+            self.hash_password(password),
+            datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        ))
+
+        return True, "Registration successful."
+
+    def login_user(self, username, password):
+        return self.fetchone("""
+            SELECT *
+            FROM users
+            WHERE username=? AND password=?
+        """, (
+            username.strip(),
+            self.hash_password(password)
+        ))
+
+    def login_admin(self, username, password):
+        return self.fetchone("""
+            SELECT *
+            FROM administrators
+            WHERE username=? AND password=?
+        """, (
+            username.strip(),
+            self.hash_password(password)
+        ))
+
+    def get_users(self):
+        return self.fetchall("""
+            SELECT id, username, created_at
+            FROM users
+            ORDER BY id DESC
+        """)
+
+    def get_services(self):
+        return self.fetchall("""
+            SELECT *
+            FROM emergency_services
+            ORDER BY id ASC
+        """)
+
+    def get_contacts(self):
+        return self.fetchall("""
+            SELECT *
+            FROM emergency_contacts
+            ORDER BY id DESC
+        """)
+
+    def get_reports(self):
+        return self.fetchall("""
+            SELECT *
+            FROM emergency_reports
+            ORDER BY id DESC
+        """)
+
+    def add_contact(self, name, category, phone, address):
+        return self.execute("""
+            INSERT INTO emergency_contacts
+            (name, category, phone, address)
+            VALUES (?, ?, ?, ?)
+        """, (
+            name,
+            category,
+            phone,
+            address
+        ))
+
+    def delete_user(self, user_id):
+        row = self.fetchone(
+            "SELECT username FROM users WHERE id=?",
+            (user_id,)
+        )
+
+        if not row:
+            return False
+
+        username = row["username"]
+
+        self.execute(
+            "DELETE FROM emergency_reports WHERE username=?",
+            (username,)
+        )
+
+        self.execute(
+            "DELETE FROM users WHERE id=?",
+            (user_id,)
+        )
+
+        return True
+
+    def delete_contact(self, contact_id):
+        self.execute(
+            "DELETE FROM emergency_contacts WHERE id=?",
+            (contact_id,)
+        )
+
+    def delete_report(self, report_id):
+        self.execute(
+            "DELETE FROM emergency_reports WHERE id=?",
+            (report_id,)
+        )
+
+    def delete_service(self, service_id):
+        self.execute(
+            "DELETE FROM emergency_services WHERE id=?",
+            (service_id,)
+        )
+
+    def add_report(
+        self,
+        username,
+        category,
+        title,
+        description,
+        phone
+    ):
+        return self.execute("""
+            INSERT INTO emergency_reports
+            (username, category, title, description, phone, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """, (
+            username,
+            category,
+            title,
+            description,
+            phone,
+            datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        ))
+
+    def close(self):
+        pass
+
+
+class ScrollableFrame(tk.Frame):
+    def __init__(self, parent, bg=None):
+        background = bg if bg else COLORS["bg"]
+
+        super().__init__(
+            parent,
+            bg=background
+        )
+
+        self.canvas = tk.Canvas(
+            self,
+            bg=background,
+            highlightthickness=0
+        )
+
+        self.scrollbar = ttk.Scrollbar(
+            self,
+            orient="vertical",
+            command=self.canvas.yview
+        )
+
+        self.inner = tk.Frame(
+            self.canvas,
+            bg=background
+        )
+
+        self.window_id = self.canvas.create_window(
+            (0, 0),
+            window=self.inner,
+            anchor="nw"
+        )
+
+        self.canvas.configure(
+            yscrollcommand=self.scrollbar.set
+        )
+
+        self.canvas.pack(
+            side="left",
+            fill="both",
+            expand=True
+        )
+
+        self.scrollbar.pack(
+            side="right",
+            fill="y"
+        )
+
+        self.inner.bind(
+            "<Configure>",
+            self.on_inner_configure
+        )
+
+        self.canvas.bind(
+            "<Configure>",
+            self.on_canvas_configure
+        )
+
+        self.canvas.bind_all(
+            "<MouseWheel>",
+            self.mousewheel
+        )
+
+    def on_inner_configure(self, event):
+        self.canvas.configure(
+            scrollregion=self.canvas.bbox("all")
+        )
+
+    def on_canvas_configure(self, event):
+        self.canvas.itemconfigure(
+            self.window_id,
+            width=event.width
+        )
+
+    def mousewheel(self, event):
+        try:
+            self.canvas.yview_scroll(
+                int(-1 * (event.delta / 120)),
+                "units"
+            )
+        except Exception:
+            pass
+
+
+class EmergencyApp:
+    def __init__(self, root):
+        self.root = root
+        self.root.title(
+            "Emergency Management and Response System"
+        )
+        self.root.geometry("1200x760")
+        self.root.minsize(900, 620)
+        self.root.configure(
+            bg=COLORS["bg"]
+        )
+
+        self.db = Database()
+
+        self.current_user = None
+        self.current_admin = None
+
+        self.image_queue = Queue()
+        self.image_cache = {}
+
+        self.history = []
+
+        self.setup_style()
+
+        self.root.protocol(
+            "WM_DELETE_WINDOW",
+            self.on_close
+        )
+
+        self.show_home()
+
+        self.root.after(
+            100,
+            self.process_image_queue
+        )
+
+    def setup_style(self):
+        style = ttk.Style()
+
+        try:
+            style.theme_use("clam")
+        except Exception:
+            pass
+
+        style.configure(
+            "Treeview",
+            background=COLORS["panel"],
+            foreground=COLORS["text"],
+            fieldbackground=COLORS["panel"],
+            rowheight=34,
+            borderwidth=0,
+            font=("Segoe UI", 10)
+        )
+
+        style.configure(
+            "Treeview.Heading",
+            background=COLORS["primary"],
+            foreground=COLORS["text"],
+            font=("Segoe UI", 10, "bold"),
+            padding=8
+        )
+
+        style.map(
+            "Treeview",
+            background=[
+                ("selected", COLORS["primary_dark"])
+            ],
+            foreground=[
+                ("selected", COLORS["text"])
+            ]
+        )
+
+        style.configure(
+            "TNotebook",
+            background=COLORS["panel"],
+            borderwidth=0
+        )
+
+        style.configure(
+            "TNotebook.Tab",
+            background=COLORS["panel2"],
+            foreground=COLORS["text"],
+            padding=(18, 10),
+            font=("Segoe UI", 10, "bold")
+        )
+
+        style.map(
+            "TNotebook.Tab",
+            background=[
+                ("selected", COLORS["primary"])
+            ],
+            foreground=[
+                ("selected", COLORS["text"])
+            ]
+        )
+
+    def clear(self):
+        for widget in self.root.winfo_children():
+            widget.destroy()
+
+    def make_button(
+        self,
+        parent,
+        text,
+        command,
+        bg=None
+    ):
+        if bg is None:
+            bg = COLORS["primary"]
+
+        return tk.Button(
+            parent,
+            text=text,
+            command=command,
+            bg=bg,
+            fg=COLORS["text"],
+            activebackground=COLORS["primary_dark"],
+            activeforeground=COLORS["text"],
+            relief="flat",
+            bd=0,
+            cursor="hand2",
+            font=("Segoe UI", 10, "bold"),
+            padx=16,
+            pady=10
+        )
+
+    def entry(self, parent, show=None):
+        return tk.Entry(
+            parent,
+            bg=COLORS["input"],
+            fg=COLORS["text"],
+            insertbackground=COLORS["text"],
+            relief="flat",
+            bd=1,
+            highlightthickness=1,
+            highlightbackground=COLORS["border"],
+            highlightcolor=COLORS["primary"],
+            font=("Segoe UI", 11),
+            show=show
+        )
+
+    def create_back_button(self, parent):
+        button = self.make_button(
+            parent,
+            "← Back",
+            self.go_back,
+            COLORS["panel2"]
+        )
+
+        button.pack(
+            side="left",
+            padx=18,
+            pady=18
+        )
+
+        return button
+
+    def create_header(
+        self,
+        parent,
+        title,
+        subtitle=None,
+        show_back=True,
+        show_logout=False
+    ):
+        header = tk.Frame(
+            parent,
+            bg=COLORS["panel"],
+            height=82
+        )
+
+        header.pack(
+            fill="x"
+        )
+
+        header.pack_propagate(False)
+
+        if show_back:
+            self.create_back_button(header)
+
+        left = tk.Frame(
+            header,
+            bg=COLORS["panel"]
+        )
+
+        left.pack(
+            side="left",
+            fill="y"
+        )
+
+        tk.Label(
+            left,
+            text="🚨",
+            bg=COLORS["panel"],
+            fg=COLORS["text"],
+            font=("Segoe UI", 28)
+        ).pack(
+            side="left",
+            padx=(5, 12)
+        )
+
+        text_frame = tk.Frame(
+            left,
+            bg=COLORS["panel"]
+        )
+
+        text_frame.pack(
+            side="left",
+            fill="y",
+            pady=12
+        )
+
+        tk.Label(
+            text_frame,
+            text=title,
+            bg=COLORS["panel"],
+            fg=COLORS["text"],
+            font=("Segoe UI", 18, "bold")
+        ).pack(
+            anchor="w"
+        )
+
+        if subtitle:
+            tk.Label(
+                text_frame,
+                text=subtitle,
+                bg=COLORS["panel"],
+                fg=COLORS["muted"],
+                font=("Segoe UI", 9)
+            ).pack(
+                anchor="w"
+            )
+
+        if show_logout:
+            self.make_button(
+                header,
+                "Logout",
+                self.logout,
+                COLORS["danger"]
+            ).pack(
+                side="right",
+                padx=20,
+                pady=18
+            )
+
+        return header
+
+    def create_password_field(
+        self,
+        parent,
+        row,
+        label_text
+    ):
+        tk.Label(
+            parent,
+            text=label_text,
+            bg=COLORS["panel"],
+            fg=COLORS["text"],
+            font=("Segoe UI", 10, "bold")
+        ).grid(
+            row=row,
+            column=0,
+            sticky="w",
+            pady=(12, 5)
+        )
+
+        frame = tk.Frame(
+            parent,
+            bg=COLORS["panel"]
+        )
+
+        frame.grid(
+            row=row + 1,
+            column=0,
+            sticky="ew"
+        )
+
+        frame.columnconfigure(
+            0,
+            weight=1
+        )
+
+        password_entry = self.entry(
+            frame,
+            show="*"
+        )
+
+        password_entry.grid(
+            row=0,
+            column=0,
+            sticky="ew",
+            ipady=9
+        )
+
+        visible = [False]
+
+        def toggle_password():
+            if visible[0]:
+                password_entry.configure(
+                    show="*"
+                )
+                button.configure(
+                    text="Show"
+                )
+                visible[0] = False
+            else:
+                password_entry.configure(
+                    show=""
+                )
+                button.configure(
+                    text="Hide"
+                )
+                visible[0] = True
+
+        button = tk.Button(
+            frame,
+            text="Show",
+            command=toggle_password,
+            bg=COLORS["panel2"],
+            fg=COLORS["text"],
+            activebackground=COLORS["primary_dark"],
+            activeforeground=COLORS["text"],
+            relief="flat",
+            bd=0,
+            cursor="hand2",
+            font=("Segoe UI", 9, "bold"),
+            padx=12
+        )
+
+        button.grid(
+            row=0,
+            column=1,
+            padx=(7, 0),
+            ipady=7
+        )
+
+        return password_entry
+
+    def show_home(self):
+        self.clear()
+        self.history = []
+
+        main = tk.Frame(
+            self.root,
+            bg=COLORS["bg"]
+        )
+
+        main.pack(
+            fill="both",
+            expand=True
+        )
+
+        top = tk.Frame(
+            main,
+            bg=COLORS["panel"],
+            height=75
+        )
+
+        top.pack(
+            fill="x"
+        )
+
+        top.pack_propagate(False)
+
+        tk.Label(
+            top,
+            text="🚨 Emergency Response",
+            bg=COLORS["panel"],
+            fg=COLORS["text"],
+            font=("Segoe UI", 20, "bold")
+        ).pack(
+            side="left",
+            padx=30
+        )
+
+        self.make_button(
+            top,
+            "🔐 Administrator",
+            self.show_admin_login,
+            COLORS["danger"]
+        ).pack(
+            side="right",
+            padx=25,
+            pady=15
+        )
+
+        content = tk.Frame(
+            main,
+            bg=COLORS["bg"]
+        )
+
+        content.pack(
+            fill="both",
+            expand=True
+        )
+
+        content.columnconfigure(
+            0,
+            weight=1
+        )
+
+        content.columnconfigure(
+            1,
+            weight=1
+        )
+
+        content.rowconfigure(
+            0,
+            weight=1
+        )
+
+        left = tk.Frame(
+            content,
+            bg=COLORS["bg"]
+        )
+
+        left.grid(
+            row=0,
+            column=0,
+            sticky="nsew",
+            padx=55,
+            pady=60
+        )
+
+        tk.Label(
+            left,
+            text="Emergency Management\n& Response System",
+            bg=COLORS["bg"],
+            fg=COLORS["text"],
+            font=("Segoe UI", 34, "bold"),
+            justify="left"
+        ).pack(
+            anchor="w",
+            pady=(20, 15)
+        )
+
+        tk.Label(
+            left,
+            text="Fast access to emergency services,\ncontacts, reporting and response information.",
+            bg=COLORS["bg"],
+            fg=COLORS["muted"],
+            font=("Segoe UI", 13),
+            justify="left"
+        ).pack(
+            anchor="w"
+        )
+
+        buttons = tk.Frame(
+            left,
+            bg=COLORS["bg"]
+        )
+
+        buttons.pack(
+            anchor="w",
+            pady=35
+        )
+
+        self.make_button(
+            buttons,
+            "🔑 User Login",
+            self.show_login
+        ).pack(
+            side="left",
+            padx=(0, 10)
+        )
+
+        self.make_button(
+            buttons,
+            "📝 Register",
+            self.show_register,
+            COLORS["success"]
+        ).pack(
+            side="left"
+        )
+
+        right = tk.Frame(
+            content,
+            bg=COLORS["panel"],
+            highlightbackground=COLORS["border"],
+            highlightthickness=1
+        )
+
+        right.grid(
+            row=0,
+            column=1,
+            sticky="nsew",
+            padx=55,
+            pady=60
+        )
+
+        tk.Label(
+            right,
+            text="🚑",
+            bg=COLORS["panel"],
+            fg=COLORS["text"],
+            font=("Segoe UI", 80)
+        ).pack(
+            pady=(70, 15)
+        )
+
+        tk.Label(
+            right,
+            text="Emergency Help",
+            bg=COLORS["panel"],
+            fg=COLORS["text"],
+            font=("Segoe UI", 25, "bold")
+        ).pack()
+
+        tk.Label(
+            right,
+            text="Access emergency services and contacts\nwhenever you need them.",
+            bg=COLORS["panel"],
+            fg=COLORS["muted"],
+            font=("Segoe UI", 11),
+            justify="center"
+        ).pack(
+            pady=15
+        )
+
+        self.make_button(
+            right,
+            "View Emergency Services",
+            self.show_services
+        ).pack(
+            pady=15
+        )
+
+    def show_login(self):
+        self.clear()
+
+        self.create_header(
+            self.root,
+            "User Login",
+            "Sign in to access emergency services"
+        )
+
+        container = tk.Frame(
+            self.root,
+            bg=COLORS["bg"]
+        )
+
+        container.pack(
+            fill="both",
+            expand=True
+        )
+
+        card = tk.Frame(
+            container,
+            bg=COLORS["panel"],
+            highlightbackground=COLORS["border"],
+            highlightthickness=1
+        )
+
+        card.place(
+            relx=0.5,
+            rely=0.48,
+            anchor="center",
+            relwidth=0.42,
+            relheight=0.58
+        )
+
+        tk.Label(
+            card,
+            text="🔑",
+            bg=COLORS["panel"],
+            fg=COLORS["text"],
+            font=("Segoe UI", 42)
+        ).pack(
+            pady=(30, 5)
+        )
+
+        tk.Label(
+            card,
+            text="User Login",
+            bg=COLORS["panel"],
+            fg=COLORS["text"],
+            font=("Segoe UI", 24, "bold")
+        ).pack()
+
+        form = tk.Frame(
+            card,
+            bg=COLORS["panel"]
+        )
+
+        form.pack(
+            fill="x",
+            padx=45,
+            pady=15
+        )
+
+        form.columnconfigure(
+            0,
+            weight=1
+        )
+
+        tk.Label(
+            form,
+            text="Username",
+            bg=COLORS["panel"],
+            fg=COLORS["text"],
+            font=("Segoe UI", 10, "bold")
+        ).grid(
+            row=0,
+            column=0,
+            sticky="w",
+            pady=(5, 5)
+        )
+
+        username = self.entry(form)
+
+        username.grid(
+            row=1,
+            column=0,
+            sticky="ew",
+            ipady=9
+        )
+
+        password = self.create_password_field(
+            form,
+            2,
+            "Password"
+        )
+
+        def login():
+            user = self.db.login_user(
+                username.get(),
+                password.get()
+            )
+
+            if user:
+                self.current_user = dict(user)
+                self.show_dashboard()
+            else:
+                messagebox.showerror(
+                    "Login Failed",
+                    "Invalid username or password."
+                )
+
+        self.make_button(
+            form,
+            "Login",
+            login
+        ).grid(
+            row=4,
+            column=0,
+            sticky="ew",
+            pady=20
+        )
+
+        self.make_button(
+            form,
+            "Create Account",
+            self.show_register,
+            COLORS["success"]
+        ).grid(
+            row=5,
+            column=0,
+            sticky="ew"
+        )
+
+    def show_register(self):
+        self.clear()
+
+        self.create_header(
+            self.root,
+            "User Registration",
+            "Create your user account"
+        )
+
+        container = tk.Frame(
+            self.root,
+            bg=COLORS["bg"]
+        )
+
+        container.pack(
+            fill="both",
+            expand=True
+        )
+
+        card = tk.Frame(
+            container,
+            bg=COLORS["panel"],
+            highlightbackground=COLORS["border"],
+            highlightthickness=1
+        )
+
+        card.place(
+            relx=0.5,
+            rely=0.48,
+            anchor="center",
+            relwidth=0.44,
+            relheight=0.68
+        )
+
+        tk.Label(
+            card,
+            text="📝",
+            bg=COLORS["panel"],
+            fg=COLORS["text"],
+            font=("Segoe UI", 40)
+        ).pack(
+            pady=(25, 0)
+        )
+
+        tk.Label(
+            card,
+            text="Create User Account",
+            bg=COLORS["panel"],
+            fg=COLORS["text"],
+            font=("Segoe UI", 23, "bold")
+        ).pack()
+
+        form = tk.Frame(
+            card,
+            bg=COLORS["panel"]
+        )
+
+        form.pack(
+            fill="x",
+            padx=45
+        )
+
+        form.columnconfigure(
+            0,
+            weight=1
+        )
+
+        tk.Label(
+            form,
+            text="Username",
+            bg=COLORS["panel"],
+            fg=COLORS["text"],
+            font=("Segoe UI", 10, "bold")
+        ).grid(
+            row=0,
+            column=0,
+            sticky="w",
+            pady=(10, 5)
+        )
+
+        username = self.entry(form)
+
+        username.grid(
+            row=1,
+            column=0,
+            sticky="ew",
+            ipady=9
+        )
+
+        password = self.create_password_field(
+            form,
+            2,
+            "Password"
+        )
+
+        confirm = self.create_password_field(
+            form,
+            4,
+            "Confirm Password"
+        )
+
+        def register():
+            if password.get() != confirm.get():
+                messagebox.showerror(
+                    "Registration",
+                    "Passwords do not match."
+                )
+                return
+
+            ok, message = self.db.register_user(
+                username.get(),
+                password.get()
+            )
+
+            if ok:
+                messagebox.showinfo(
+                    "Registration",
+                    message
+                )
+                self.show_login()
+            else:
+                messagebox.showerror(
+                    "Registration",
+                    message
+                )
+
+        self.make_button(
+            form,
+            "Create Account",
+            register,
+            COLORS["success"]
+        ).grid(
+            row=6,
+            column=0,
+            sticky="ew",
+            pady=20
+        )
+
+    def show_admin_login(self):
+        self.clear()
+
+        self.create_header(
+            self.root,
+            "Administrator Login",
+            "Authorized administrators only"
+        )
+
+        container = tk.Frame(
+            self.root,
+            bg=COLORS["bg"]
+        )
+
+        container.pack(
+            fill="both",
+            expand=True
+        )
+
+        card = tk.Frame(
+            container,
+            bg=COLORS["panel"],
+            highlightbackground=COLORS["danger"],
+            highlightthickness=1
+        )
+
+        card.place(
+            relx=0.5,
+            rely=0.48,
+            anchor="center",
+            relwidth=0.42,
+            relheight=0.60
+        )
+
+        tk.Label(
+            card,
+            text="🛡️",
+            bg=COLORS["panel"],
+            fg=COLORS["danger"],
+            font=("Segoe UI", 45)
+        ).pack(
+            pady=(30, 5)
+        )
+
+        tk.Label(
+            card,
+            text="Administrator Login",
+            bg=COLORS["panel"],
+            fg=COLORS["text"],
+            font=("Segoe UI", 23, "bold")
+        ).pack()
+
+        form = tk.Frame(
+            card,
+            bg=COLORS["panel"]
+        )
+
+        form.pack(
+            fill="x",
+            padx=45,
+            pady=15
+        )
+
+        form.columnconfigure(
+            0,
+            weight=1
+        )
+
+        tk.Label(
+            form,
+            text="Administrator Username",
+            bg=COLORS["panel"],
+            fg=COLORS["text"],
+            font=("Segoe UI", 10, "bold")
+        ).grid(
+            row=0,
+            column=0,
+            sticky="w",
+            pady=(5, 5)
+        )
+
+        username = self.entry(form)
+
+        username.grid(
+            row=1,
+            column=0,
+            sticky="ew",
+            ipady=9
+        )
+
+        password = self.create_password_field(
+            form,
+            2,
+            "Administrator Password"
+        )
+
+        def login():
+            admin = self.db.login_admin(
+                username.get(),
+                password.get()
+            )
+
+            if admin:
+                self.current_admin = dict(admin)
+                self.show_admin_dashboard()
+            else:
+                messagebox.showerror(
+                    "Access Denied",
+                    "Invalid administrator username or password."
+                )
+
+        self.make_button(
+            form,
+            "Administrator Login",
+            login,
+            COLORS["danger"]
+        ).grid(
+            row=4,
+            column=0,
+            sticky="ew",
+            pady=20
+        )
+
+    def show_dashboard(self):
+        self.clear()
+
+        self.create_header(
+            self.root,
+            "Emergency Dashboard",
+            f"Welcome, {self.current_user['username']}",
+            show_back=True,
+            show_logout=True
+        )
+
+        content = ScrollableFrame(
+            self.root,
+            COLORS["bg"]
+        )
+
+        content.pack(
+            fill="both",
+            expand=True,
+            padx=20,
+            pady=20
+        )
+
+        inner = content.inner
+
+        tk.Label(
+            inner,
+            text="Emergency Services",
+            bg=COLORS["bg"],
+            fg=COLORS["text"],
+            font=("Segoe UI", 25, "bold")
+        ).pack(
+            anchor="w",
+            pady=(5, 15)
+        )
+
+        cards = tk.Frame(
+            inner,
+            bg=COLORS["bg"]
+        )
+
+        cards.pack(
+            fill="x"
+        )
+
+        cards.columnconfigure(
+            (0, 1, 2),
+            weight=1
+        )
+
+        options = [
+            ("🚑", "Emergency Services", self.show_services),
+            ("📞", "Emergency Contacts", self.show_contacts),
+            ("📝", "Report Emergency", self.show_report),
+            ("🛡️", "Safety Information", self.show_safety)
+        ]
+
+        for index, (icon, title, command) in enumerate(options):
+            row = index // 3
+            col = index % 3
+
+            card = tk.Frame(
+                cards,
+                bg=COLORS["card"],
+                highlightbackground=COLORS["border"],
+                highlightthickness=1
+            )
+
+            card.grid(
+                row=row,
+                column=col,
+                sticky="nsew",
+                padx=8,
+                pady=8
+            )
+
+            tk.Label(
+                card,
+                text=icon,
+                bg=COLORS["card"],
+                fg=COLORS["text"],
+                font=("Segoe UI", 38)
+            ).pack(
+                pady=(25, 10)
+            )
+
+            tk.Label(
+                card,
+                text=title,
+                bg=COLORS["card"],
+                fg=COLORS["text"],
+                font=("Segoe UI", 14, "bold")
+            ).pack(
+                pady=5
+            )
+
+            self.make_button(
+                card,
+                "Open",
+                command
+            ).pack(
+                pady=(10, 25)
+            )
+
+    def show_services(self):
+        self.clear()
+
+        self.create_header(
+            self.root,
+            "Emergency Services",
+            "Emergency response services"
+        )
+
+        body = ScrollableFrame(
+            self.root,
+            COLORS["bg"]
+        )
+
+        body.pack(
+            fill="both",
+            expand=True,
+            padx=20,
+            pady=15
+        )
+
+        inner = body.inner
+
+        inner.columnconfigure(
+            (0, 1),
+            weight=1
+        )
+
+        services = self.db.get_services()
+
+        for index, service in enumerate(services):
+            row = index // 2
+            col = index % 2
+
+            card = tk.Frame(
+                inner,
+                bg=COLORS["panel"],
+                highlightbackground=COLORS["border"],
+                highlightthickness=1
+            )
+
+            card.grid(
+                row=row,
+                column=col,
+                sticky="nsew",
+                padx=10,
+                pady=10
+            )
+
+            image_holder = tk.Label(
+                card,
+                text=self.service_emoji(
+                    service["category"]
+                ),
+                bg=COLORS["panel"],
+                fg=COLORS["text"],
+                font=("Segoe UI", 48)
+            )
+
+            image_holder.pack(
+                fill="x",
+                pady=(15, 5)
+            )
+
+            if PIL_AVAILABLE and service["image_key"]:
+                self.load_service_image(
+                    service["image_key"],
+                    image_holder
+                )
+
+            tk.Label(
+                card,
+                text=service["title"],
+                bg=COLORS["panel"],
+                fg=COLORS["text"],
+                font=("Segoe UI", 17, "bold")
+            ).pack(
+                pady=5
+            )
+
+            tk.Label(
+                card,
+                text=service["description"],
+                bg=COLORS["panel"],
+                fg=COLORS["muted"],
+                font=("Segoe UI", 10),
+                wraplength=420,
+                justify="center"
+            ).pack(
+                padx=20,
+                pady=5
+            )
+
+            self.make_button(
+                card,
+                f"📞 Call {service['phone']}",
+                lambda p=service["phone"]: self.show_phone(p),
+                COLORS["success"]
+            ).pack(
+                pady=15
+            )
+
+    def service_emoji(self, category):
+        return {
+            "Fire": "🔥",
+            "Medical": "🏥",
+            "Police": "👮",
+            "Rescue": "🚒",
+            "Ambulance": "🚑",
+            "Flood": "🌊"
+        }.get(
+            category,
+            "🚨"
+        )
+
+    def load_service_image(
+        self,
+        image_key,
+        label
+    ):
+        if not PIL_AVAILABLE:
+            return
+
+        if image_key in self.image_cache:
+            try:
+                label.configure(
+                    image=self.image_cache[image_key],
+                    text=""
+                )
+            except Exception:
+                pass
+            return
+
+        url = IMAGE_URLS.get(
+            image_key
+        )
+
+        if not url:
+            return
+
+        def download():
+            try:
+                data = urllib.request.urlopen(
+                    url,
+                    timeout=8
+                ).read()
+
+                self.image_queue.put(
+                    (
+                        image_key,
+                        label,
+                        data
+                    )
+                )
+            except Exception:
+                pass
+
+        threading.Thread(
+            target=download,
+            daemon=True
+        ).start()
+
+    def process_image_queue(self):
+        try:
+            while True:
+                image_key, label, data = (
+                    self.image_queue.get_nowait()
+                )
+
+                if not PIL_AVAILABLE:
+                    continue
+
+                try:
+                    image = Image.open(
+                        BytesIO(data)
+                    )
+
+                    image.thumbnail(
+                        (480, 190)
+                    )
+
+                    photo = ImageTk.PhotoImage(
+                        image
+                    )
+
+                    self.image_cache[
+                        image_key
+                    ] = photo
+
+                    if label.winfo_exists():
+                        label.configure(
+                            image=photo,
+                            text=""
+                        )
+
+                except Exception:
+                    pass
+
+        except Empty:
+            pass
+
+        try:
+            self.root.after(
+                100,
+                self.process_image_queue
+            )
+        except Exception:
+            pass
+
+    def show_contacts(self):
+        self.clear()
+
+        self.create_header(
+            self.root,
+            "Emergency Contacts",
+            "Emergency numbers and locations"
+        )
+
+        body = ScrollableFrame(
+            self.root,
+            COLORS["bg"]
+        )
+
+        body.pack(
+            fill="both",
+            expand=True,
+            padx=20,
+            pady=15
+        )
+
+        inner = body.inner
+
+        contacts = self.db.get_contacts()
+
+        for contact in contacts:
+            card = tk.Frame(
+                inner,
+                bg=COLORS["panel"],
+                highlightbackground=COLORS["border"],
+                highlightthickness=1
+            )
+
+            card.pack(
+                fill="x",
+                padx=20,
+                pady=7
+            )
+
+            left = tk.Frame(
+                card,
+                bg=COLORS["panel"]
+            )
+
+            left.pack(
+                side="left",
+                fill="both",
+                expand=True,
+                padx=20,
+                pady=15
+            )
+
+            tk.Label(
+                left,
+                text=contact["name"],
+                bg=COLORS["panel"],
+                fg=COLORS["text"],
+                font=("Segoe UI", 14, "bold")
+            ).pack(
+                anchor="w"
+            )
+
+            tk.Label(
+                left,
+                text=f"Category: {contact['category']}",
+                bg=COLORS["panel"],
+                fg=COLORS["muted"],
+                font=("Segoe UI", 9)
+            ).pack(
+                anchor="w",
+                pady=3
+            )
+
+            tk.Label(
+                left,
+                text=f"📍 {contact['address']}",
+                bg=COLORS["panel"],
+                fg=COLORS["muted"],
+                font=("Segoe UI", 10)
+            ).pack(
+                anchor="w"
+            )
+
+            self.make_button(
+                card,
+                f"📞 {contact['phone']}",
+                lambda p=contact["phone"]: self.show_phone(p),
+                COLORS["success"]
+            ).pack(
+                side="right",
+                padx=20,
+                pady=20
+            )
+
+    def show_report(self):
+        self.clear()
+
+        self.create_header(
+            self.root,
+            "Report Emergency",
+            "Send an emergency report"
+        )
+
+        outer = tk.Frame(
+            self.root,
+            bg=COLORS["bg"]
+        )
+
+        outer.pack(
+            fill="both",
+            expand=True
+        )
+
+        form = tk.Frame(
+            outer,
+            bg=COLORS["panel"]
+        )
+
+        form.place(
+            relx=0.5,
+            rely=0.5,
+            anchor="center",
+            relwidth=0.65,
+            relheight=0.78
+        )
+
+        form.columnconfigure(
+            1,
+            weight=1
+        )
+
+        form.rowconfigure(
+            3,
+            weight=1
+        )
+
+        tk.Label(
+            form,
+            text="Emergency Category",
+            bg=COLORS["panel"],
+            fg=COLORS["text"],
+            font=("Segoe UI", 10, "bold")
+        ).grid(
+            row=0,
+            column=0,
+            padx=20,
+            pady=12,
+            sticky="w"
+        )
+
+        category = ttk.Combobox(
+            form,
+            values=[
+                "Fire",
+                "Medical",
+                "Police",
+                "Rescue",
+                "Flood",
+                "Other"
+            ],
+            state="readonly",
+            font=("Segoe UI", 10)
+        )
+
+        category.grid(
+            row=0,
+            column=1,
+            padx=20,
+            pady=12,
+            sticky="ew"
+        )
+
+        category.set("Medical")
+
+        tk.Label(
+            form,
+            text="Title",
+            bg=COLORS["panel"],
+            fg=COLORS["text"],
+            font=("Segoe UI", 10, "bold")
+        ).grid(
+            row=1,
+            column=0,
+            padx=20,
+            pady=12,
+            sticky="w"
+        )
+
+        title = self.entry(form)
+
+        title.grid(
+            row=1,
+            column=1,
+            padx=20,
+            pady=12,
+            sticky="ew",
+            ipady=8
+        )
+
+        tk.Label(
+            form,
+            text="Phone",
+            bg=COLORS["panel"],
+            fg=COLORS["text"],
+            font=("Segoe UI", 10, "bold")
+        ).grid(
+            row=2,
+            column=0,
+            padx=20,
+            pady=12,
+            sticky="w"
+        )
+
+        phone = self.entry(form)
+
+        phone.grid(
+            row=2,
+            column=1,
+            padx=20,
+            pady=12,
+            sticky="ew",
+            ipady=8
+        )
+
+        tk.Label(
+            form,
+            text="Description",
+            bg=COLORS["panel"],
+            fg=COLORS["text"],
+            font=("Segoe UI", 10, "bold")
+        ).grid(
+            row=3,
+            column=0,
+            padx=20,
+            pady=12,
+            sticky="nw"
+        )
+
+        description = tk.Text(
+            form,
+            bg=COLORS["input"],
+            fg=COLORS["text"],
+            insertbackground=COLORS["text"],
+            relief="flat",
+            font=("Segoe UI", 10),
+            height=8
+        )
+
+        description.grid(
+            row=3,
+            column=1,
+            padx=20,
+            pady=12,
+            sticky="nsew"
+        )
+
+        def submit():
+            if not title.get().strip():
+                messagebox.showwarning(
+                    "Report",
+                    "Please enter a title."
+                )
+                return
+
+            if not phone.get().strip():
+                messagebox.showwarning(
+                    "Report",
+                    "Please enter a phone number."
+                )
+                return
+
+            details = description.get(
+                "1.0",
+                "end"
+            ).strip()
+
+            if not details:
+                messagebox.showwarning(
+                    "Report",
+                    "Please describe the emergency."
+                )
+                return
+
+            self.db.add_report(
+                self.current_user["username"],
+                category.get(),
+                title.get().strip(),
+                details,
+                phone.get().strip()
+            )
+
+            messagebox.showinfo(
+                "Report Submitted",
+                "Your emergency report has been submitted successfully."
+            )
+
+            self.show_dashboard()
+
+        self.make_button(
+            form,
+            "Submit Emergency Report",
+            submit,
+            COLORS["danger"]
+        ).grid(
+            row=4,
+            column=0,
+            columnspan=2,
+            pady=20
+        )
+
+    def show_safety(self):
+        self.clear()
+
+        self.create_header(
+            self.root,
+            "Safety Information",
+            "Basic emergency response guidance"
+        )
+
+        body = ScrollableFrame(
+            self.root,
+            COLORS["bg"]
+        )
+
+        body.pack(
+            fill="both",
+            expand=True,
+            padx=25,
+            pady=20
+        )
+
+        inner = body.inner
+
+        safety_items = [
+            (
+                "🔥 Fire Emergency",
+                "Stay calm, evacuate the building, avoid elevators, and call emergency services."
+            ),
+            (
+                "🏥 Medical Emergency",
+                "Check for immediate danger, call medical emergency services, and provide the patient's location."
+            ),
+            (
+                "👮 Police Emergency",
+                "Move to a safe location and provide accurate information about the situation."
+            ),
+            (
+                "🌊 Flood Emergency",
+                "Move to higher ground and never walk or drive through moving flood water."
+            ),
+            (
+                "🚨 General Emergency",
+                "Keep emergency numbers available and provide responders with your exact location."
+            )
+        ]
+
+        for title, text in safety_items:
+            card = tk.Frame(
+                inner,
+                bg=COLORS["panel"],
+                highlightbackground=COLORS["border"],
+                highlightthickness=1
+            )
+
+            card.pack(
+                fill="x",
+                pady=8
+            )
+
+            tk.Label(
+                card,
+                text=title,
+                bg=COLORS["panel"],
+                fg=COLORS["text"],
+                font=("Segoe UI", 15, "bold")
+            ).pack(
+                anchor="w",
+                padx=20,
+                pady=(15, 5)
+            )
+
+            tk.Label(
+                card,
+                text=text,
+                bg=COLORS["panel"],
+                fg=COLORS["muted"],
+                font=("Segoe UI", 10),
+                wraplength=900,
+                justify="left"
+            ).pack(
+                anchor="w",
+                padx=20,
+                pady=(0, 15)
+            )
+
+    def show_admin_dashboard(self):
+        self.clear()
+
+        main = tk.Frame(
+            self.root,
+            bg=COLORS["bg"]
+        )
+
+        main.pack(
+            fill="both",
+            expand=True
+        )
+
+        sidebar = tk.Frame(
+            main,
+            bg=COLORS["panel"],
+            width=235
+        )
+
+        sidebar.pack(
+            side="left",
+            fill="y"
+        )
+
+        sidebar.pack_propagate(False)
+
+        tk.Label(
+            sidebar,
+            text="🛡️",
+            bg=COLORS["panel"],
+            fg=COLORS["danger"],
+            font=("Segoe UI", 42)
+        ).pack(
+            pady=(25, 5)
+        )
+
+        tk.Label(
+            sidebar,
+            text="Administrator",
+            bg=COLORS["panel"],
+            fg=COLORS["text"],
+            font=("Segoe UI", 17, "bold")
+        ).pack()
+
+        tk.Label(
+            sidebar,
+            text=self.current_admin["username"],
+            bg=COLORS["panel"],
+            fg=COLORS["muted"],
+            font=("Segoe UI", 9)
+        ).pack(
+            pady=(2, 20)
+        )
+
+        menu = [
+            ("📊 Overview", self.show_admin_overview),
+            ("👥 Users", self.show_admin_users),
+            ("📞 Contacts", self.show_admin_contacts),
+            ("📝 Reports", self.show_admin_reports),
+            ("🚑 Services", self.show_admin_services),
+            ("🗑️ Delete Data", self.show_admin_delete)
+        ]
+
+        for text, command in menu:
+            tk.Button(
+                sidebar,
+                text=text,
+                command=command,
+                bg=COLORS["panel"],
+                fg=COLORS["text"],
+                activebackground=COLORS["primary"],
+                activeforeground=COLORS["text"],
+                relief="flat",
+                bd=0,
+                anchor="w",
+                cursor="hand2",
+                font=("Segoe UI", 10, "bold"),
+                padx=25,
+                pady=13
+            ).pack(
+                fill="x"
+            )
+
+        self.make_button(
+            sidebar,
+            "🚪 Logout",
+            self.admin_logout,
+            COLORS["danger"]
+        ).pack(
+            side="bottom",
+            fill="x",
+            padx=18,
+            pady=20
+        )
+
+        self.admin_content = tk.Frame(
+            main,
+            bg=COLORS["bg"]
+        )
+
+        self.admin_content.pack(
+            side="right",
+            fill="both",
+            expand=True
+        )
+
+        self.show_admin_overview()
+
+    def clear_admin_content(self):
+        for widget in self.admin_content.winfo_children():
+            widget.destroy()
+
+    def admin_title(
+        self,
+        title,
+        subtitle=None
+    ):
+        header = tk.Frame(
+            self.admin_content,
+            bg=COLORS["bg"]
+        )
+
+        header.pack(
+            fill="x",
+            padx=25,
+            pady=(18, 10)
+        )
+
+        self.make_button(
+            header,
+            "← Back",
+            self.show_admin_overview,
+            COLORS["panel2"]
+        ).pack(
+            side="left",
+            padx=(0, 15)
+        )
+
+        text_frame = tk.Frame(
+            header,
+            bg=COLORS["bg"]
+        )
+
+        text_frame.pack(
+            side="left"
+        )
+
+        tk.Label(
+            text_frame,
+            text=title,
+            bg=COLORS["bg"],
+            fg=COLORS["text"],
+            font=("Segoe UI", 24, "bold")
+        ).pack(
+            anchor="w"
+        )
+
+        if subtitle:
+            tk.Label(
+                text_frame,
+                text=subtitle,
+                bg=COLORS["bg"],
+                fg=COLORS["muted"],
+                font=("Segoe UI", 10)
+            ).pack(
+                anchor="w"
+            )
+
+    def show_admin_overview(self):
+        self.clear_admin_content()
+
+        self.admin_title(
+            "📊 Administrator Overview",
+            "System management dashboard"
+        )
+
+        users = self.db.get_users()
+        contacts = self.db.get_contacts()
+        reports = self.db.get_reports()
+        services = self.db.get_services()
+
+        stats = tk.Frame(
+            self.admin_content,
+            bg=COLORS["bg"]
+        )
+
+        stats.pack(
+            fill="x",
+            padx=25
+        )
+
+        stats.columnconfigure(
+            (0, 1, 2, 3),
+            weight=1
+        )
+
+        values = [
+            ("👥", "Users", len(users)),
+            ("📞", "Contacts", len(contacts)),
+            ("📝", "Reports", len(reports)),
+            ("🚑", "Services", len(services))
+        ]
+
+        for index, (icon, name, value) in enumerate(values):
+            card = tk.Frame(
+                stats,
+                bg=COLORS["panel"],
+                highlightbackground=COLORS["border"],
+                highlightthickness=1
+            )
+
+            card.grid(
+                row=0,
+                column=index,
+                sticky="nsew",
+                padx=7
+            )
+
+            tk.Label(
+                card,
+                text=icon,
+                bg=COLORS["panel"],
+                fg=COLORS["text"],
+                font=("Segoe UI", 28)
+            ).pack(
+                pady=(20, 5)
+            )
+
+            tk.Label(
+                card,
+                text=str(value),
+                bg=COLORS["panel"],
+                fg=COLORS["text"],
+                font=("Segoe UI", 25, "bold")
+            ).pack()
+
+            tk.Label(
+                card,
+                text=name,
+                bg=COLORS["panel"],
+                fg=COLORS["muted"],
+                font=("Segoe UI", 10)
+            ).pack(
+                pady=(0, 20)
+            )
+
+        info = tk.Frame(
+            self.admin_content,
+            bg=COLORS["panel"]
+        )
+
+        info.pack(
+            fill="both",
+            expand=True,
+            padx=25,
+            pady=25
+        )
+
+        tk.Label(
+            info,
+            text="Quick Management",
+            bg=COLORS["panel"],
+            fg=COLORS["text"],
+            font=("Segoe UI", 17, "bold")
+        ).pack(
+            anchor="w",
+            padx=25,
+            pady=(25, 15)
+        )
+
+        self.make_button(
+            info,
+            "🗑️ Delete Data",
+            self.show_admin_delete,
+            COLORS["danger"]
+        ).pack(
+            anchor="w",
+            padx=25
+        )
+
+    def create_tree(
+        self,
+        parent,
+        columns,
+        headings,
+        widths
+    ):
+        tree = ttk.Treeview(
+            parent,
+            columns=columns,
+            show="headings"
+        )
+
+        for column, heading, width in zip(
+            columns,
+            headings,
+            widths
+        ):
+            tree.heading(
+                column,
+                text=heading
+            )
+
+            tree.column(
+                column,
+                width=width
+            )
+
+        tree.pack(
+            fill="both",
+            expand=True,
+            padx=15,
+            pady=15
+        )
+
+        return tree
+
+    def show_admin_users(self):
+        self.clear_admin_content()
+
+        self.admin_title(
+            "👥 Users",
+            "Registered system users"
+        )
+
+        container = tk.Frame(
+            self.admin_content,
+            bg=COLORS["panel"]
+        )
+
+        container.pack(
+            fill="both",
+            expand=True,
+            padx=25,
+            pady=10
+        )
+
+        tree = self.create_tree(
+            container,
+            ("id", "username", "created"),
+            ("ID", "Username", "Created"),
+            (70, 250, 250)
+        )
+
+        for user in self.db.get_users():
+            tree.insert(
+                "",
+                "end",
+                values=(
+                    user["id"],
+                    user["username"],
+                    user["created_at"]
+                )
+            )
+
+        buttons = tk.Frame(
+            self.admin_content,
+            bg=COLORS["bg"]
+        )
+
+        buttons.pack(
+            fill="x",
+            padx=25,
+            pady=15
+        )
+
+        def delete_selected():
+            selected = tree.selection()
+
+            if not selected:
+                messagebox.showwarning(
+                    "Delete User",
+                    "Select a user first."
+                )
+                return
+
+            values = tree.item(
+                selected[0],
+                "values"
+            )
+
+            if messagebox.askyesno(
+                "Confirm Delete",
+                f"Delete user '{values[1]}'?\n\n"
+                "Their emergency reports will also be deleted."
+            ):
+                self.db.delete_user(
+                    values[0]
+                )
+                self.show_admin_users()
+
+        self.make_button(
+            buttons,
+            "🗑️ Delete Selected User",
+            delete_selected,
+            COLORS["danger"]
+        ).pack(
+            side="left"
+        )
+
+    def show_admin_contacts(self):
+        self.clear_admin_content()
+
+        self.admin_title(
+            "📞 Emergency Contacts",
+            "Manage emergency contact information"
+        )
+
+        form = tk.Frame(
+            self.admin_content,
+            bg=COLORS["panel"]
+        )
+
+        form.pack(
+            fill="x",
+            padx=25,
+            pady=5
+        )
+
+        form.columnconfigure(
+            (0, 1, 2, 3),
+            weight=1
+        )
+
+        name = self.entry(form)
+        category = self.entry(form)
+        phone = self.entry(form)
+        address = self.entry(form)
+
+        fields = [
+            ("Name", name),
+            ("Category", category),
+            ("Phone", phone),
+            ("Address", address)
+        ]
+
+        for index, (label, widget) in enumerate(fields):
+            tk.Label(
+                form,
+                text=label,
+                bg=COLORS["panel"],
+                fg=COLORS["text"],
+                font=("Segoe UI", 9, "bold")
+            ).grid(
+                row=0,
+                column=index,
+                padx=8,
+                pady=(12, 4),
+                sticky="w"
+            )
+
+            widget.grid(
+                row=1,
+                column=index,
+                padx=8,
+                pady=(0, 12),
+                sticky="ew",
+                ipady=7
+            )
+
+        def add():
+            values = [
+                name.get().strip(),
+                category.get().strip(),
+                phone.get().strip(),
+                address.get().strip()
+            ]
+
+            if not all(values):
+                messagebox.showwarning(
+                    "Contact",
+                    "Please fill all fields."
+                )
+                return
+
+            self.db.add_contact(
+                *values
+            )
+
+            messagebox.showinfo(
+                "Contact",
+                "Contact added successfully."
+            )
+
+            self.show_admin_contacts()
+
+        self.make_button(
+            form,
+            "➕ Add Contact",
+            add,
+            COLORS["success"]
+        ).grid(
+            row=2,
+            column=0,
+            columnspan=4,
+            pady=(0, 12)
+        )
+
+        container = tk.Frame(
+            self.admin_content,
+            bg=COLORS["panel"]
+        )
+
+        container.pack(
+            fill="both",
+            expand=True,
+            padx=25,
+            pady=10
+        )
+
+        tree = self.create_tree(
+            container,
+            (
+                "id",
+                "name",
+                "category",
+                "phone",
+                "address"
+            ),
+            (
+                "ID",
+                "Name",
+                "Category",
+                "Phone",
+                "Address"
+            ),
+            (
+                50,
+                180,
+                120,
+                150,
+                260
+            )
+        )
+
+        for contact in self.db.get_contacts():
+            tree.insert(
+                "",
+                "end",
+                values=(
+                    contact["id"],
+                    contact["name"],
+                    contact["category"],
+                    contact["phone"],
+                    contact["address"]
+                )
+            )
+
+        def delete_selected():
+            selected = tree.selection()
+
+            if not selected:
+                messagebox.showwarning(
+                    "Delete Contact",
+                    "Select a contact first."
+                )
+                return
+
+            values = tree.item(
+                selected[0],
+                "values"
+            )
+
+            if messagebox.askyesno(
+                "Confirm Delete",
+                f"Delete contact '{values[1]}'?"
+            ):
+                self.db.delete_contact(
+                    values[0]
+                )
+
+                self.show_admin_contacts()
+
+        self.make_button(
+            self.admin_content,
+            "🗑️ Delete Selected Contact",
+            delete_selected,
+            COLORS["danger"]
+        ).pack(
+            anchor="w",
+            padx=25,
+            pady=15
+        )
+
+    def show_admin_reports(self):
+        self.clear_admin_content()
+
+        self.admin_title(
+            "📝 Emergency Reports",
+            "View submitted emergency reports"
+        )
+
+        container = tk.Frame(
+            self.admin_content,
+            bg=COLORS["panel"]
+        )
+
+        container.pack(
+            fill="both",
+            expand=True,
+            padx=25,
+            pady=10
+        )
+
+        tree = self.create_tree(
+            container,
+            (
+                "id",
+                "user",
+                "category",
+                "title",
+                "phone",
+                "created"
+            ),
+            (
+                "ID",
+                "User",
+                "Category",
+                "Title",
+                "Phone",
+                "Created"
+            ),
+            (
+                50,
+                120,
+                110,
+                220,
+                140,
+                170
+            )
+        )
+
+        for report in self.db.get_reports():
+            tree.insert(
+                "",
+                "end",
+                values=(
+                    report["id"],
+                    report["username"],
+                    report["category"],
+                    report["title"],
+                    report["phone"],
+                    report["created_at"]
+                )
+            )
+
+        buttons = tk.Frame(
+            self.admin_content,
+            bg=COLORS["bg"]
+        )
+
+        buttons.pack(
+            fill="x",
+            padx=25,
+            pady=15
+        )
+
+        def view_report():
+            selected = tree.selection()
+
+            if not selected:
+                messagebox.showwarning(
+                    "Report",
+                    "Select a report first."
+                )
+                return
+
+            report_id = tree.item(
+                selected[0],
+                "values"
+            )[0]
+
+            report = self.db.fetchone(
+                "SELECT * FROM emergency_reports WHERE id=?",
+                (report_id,)
+            )
+
+            if not report:
+                return
+
+            messagebox.showinfo(
+                "Emergency Report",
+                f"User: {report['username']}\n\n"
+                f"Category: {report['category']}\n\n"
+                f"Title: {report['title']}\n\n"
+                f"Phone: {report['phone']}\n\n"
+                f"Date: {report['created_at']}\n\n"
+                f"Description:\n{report['description']}"
+            )
+
+        def delete_report():
+            selected = tree.selection()
+
+            if not selected:
+                messagebox.showwarning(
+                    "Delete Report",
+                    "Select a report first."
+                )
+                return
+
+            values = tree.item(
+                selected[0],
+                "values"
+            )
+
+            if messagebox.askyesno(
+                "Confirm Delete",
+                f"Delete report '{values[3]}'?"
+            ):
+                self.db.delete_report(
+                    values[0]
+                )
+
+                self.show_admin_reports()
+
+        self.make_button(
+            buttons,
+            "👁 View Report",
+            view_report
+        ).pack(
+            side="left",
+            padx=(0, 8)
+        )
+
+        self.make_button(
+            buttons,
+            "🗑️ Delete Report",
+            delete_report,
+            COLORS["danger"]
+        ).pack(
+            side="left"
+        )
+
+    def show_admin_services(self):
+        self.clear_admin_content()
+
+        self.admin_title(
+            "🚑 Emergency Services",
+            "Manage emergency services"
+        )
+
+        container = tk.Frame(
+            self.admin_content,
+            bg=COLORS["panel"]
+        )
+
+        container.pack(
+            fill="both",
+            expand=True,
+            padx=25,
+            pady=10
+        )
+
+        tree = self.create_tree(
+            container,
+            (
+                "id",
+                "category",
+                "title",
+                "phone",
+                "image"
+            ),
+            (
+                "ID",
+                "Category",
+                "Title",
+                "Phone",
+                "Image"
+            ),
+            (
+                50,
+                120,
+                250,
+                130,
+                120
+            )
+        )
+
+        for service in self.db.get_services():
+            tree.insert(
+                "",
+                "end",
+                values=(
+                    service["id"],
+                    service["category"],
+                    service["title"],
+                    service["phone"],
+                    service["image_key"]
+                )
+            )
+
+        def delete_service():
+            selected = tree.selection()
+
+            if not selected:
+                messagebox.showwarning(
+                    "Delete Service",
+                    "Select a service first."
+                )
+                return
+
+            values = tree.item(
+                selected[0],
+                "values"
+            )
+
+            if messagebox.askyesno(
+                "Confirm Delete",
+                f"Delete service '{values[2]}'?"
+            ):
+                self.db.delete_service(
+                    values[0]
+                )
+
+                self.show_admin_services()
+
+        self.make_button(
+            self.admin_content,
+            "🗑️ Delete Selected Service",
+            delete_service,
+            COLORS["danger"]
+        ).pack(
+            anchor="w",
+            padx=25,
+            pady=15
+        )
+
+    def show_admin_delete(self):
+        self.clear_admin_content()
+
+        self.admin_title(
+            "🗑️ Delete Data",
+            "Choose a category and delete selected records"
+        )
+
+        notebook = ttk.Notebook(
+            self.admin_content
+        )
+
+        notebook.pack(
+            fill="both",
+            expand=True,
+            padx=25,
+            pady=10
+        )
+
+        users_tab = tk.Frame(
+            notebook,
+            bg=COLORS["bg"]
+        )
+
+        contacts_tab = tk.Frame(
+            notebook,
+            bg=COLORS["bg"]
+        )
+
+        reports_tab = tk.Frame(
+            notebook,
+            bg=COLORS["bg"]
+        )
+
+        services_tab = tk.Frame(
+            notebook,
+            bg=COLORS["bg"]
+        )
+
+        notebook.add(
+            users_tab,
+            text="👥 Users"
+        )
+
+        notebook.add(
+            contacts_tab,
+            text="📞 Contacts"
+        )
+
+        notebook.add(
+            reports_tab,
+            text="📝 Reports"
+        )
+
+        notebook.add(
+            services_tab,
+            text="🚑 Services"
+        )
+
+        self.create_delete_users_tab(
+            users_tab
+        )
+
+        self.create_delete_contacts_tab(
+            contacts_tab
+        )
+
+        self.create_delete_reports_tab(
+            reports_tab
+        )
+
+        self.create_delete_services_tab(
+            services_tab
+        )
+
+    def create_delete_users_tab(self, parent):
+        parent.rowconfigure(
+            0,
+            weight=1
+        )
+
+        parent.columnconfigure(
+            0,
+            weight=1
+        )
+
+        tree = self.create_tree(
+            parent,
+            ("id", "username", "created"),
+            ("ID", "Username", "Created"),
+            (60, 250, 250)
+        )
+
+        for user in self.db.get_users():
+            tree.insert(
+                "",
+                "end",
+                values=(
+                    user["id"],
+                    user["username"],
+                    user["created_at"]
+                )
+            )
+
+        def delete():
+            selected = tree.selection()
+
+            if not selected:
+                messagebox.showwarning(
+                    "Delete User",
+                    "Select a user first."
+                )
+                return
+
+            values = tree.item(
+                selected[0],
+                "values"
+            )
+
+            if messagebox.askyesno(
+                "Confirm Delete",
+                f"Delete user '{values[1]}'?\n\n"
+                "The user's emergency reports will also be deleted."
+            ):
+                self.db.delete_user(
+                    values[0]
+                )
+
+                self.show_admin_delete()
+
+        self.make_button(
+            parent,
+            "🗑️ Delete Selected User",
+            delete,
+            COLORS["danger"]
+        ).pack(
+            pady=(0, 15)
+        )
+
+    def create_delete_contacts_tab(self, parent):
+        parent.rowconfigure(
+            0,
+            weight=1
+        )
+
+        parent.columnconfigure(
+            0,
+            weight=1
+        )
+
+        tree = self.create_tree(
+            parent,
+            (
+                "id",
+                "name",
+                "category",
+                "phone",
+                "address"
+            ),
+            (
+                "ID",
+                "Name",
+                "Category",
+                "Phone",
+                "Address"
+            ),
+            (
+                50,
+                180,
+                120,
+                150,
+                260
+            )
+        )
+
+        for contact in self.db.get_contacts():
+            tree.insert(
+                "",
+                "end",
+                values=(
+                    contact["id"],
+                    contact["name"],
+                    contact["category"],
+                    contact["phone"],
+                    contact["address"]
+                )
+            )
+
+        def delete():
+            selected = tree.selection()
+
+            if not selected:
+                messagebox.showwarning(
+                    "Delete Contact",
+                    "Select a contact first."
+                )
+                return
+
+            values = tree.item(
+                selected[0],
+                "values"
+            )
+
+            if messagebox.askyesno(
+                "Confirm Delete",
+                f"Delete contact '{values[1]}'?"
+            ):
+                self.db.delete_contact(
+                    values[0]
+                )
+
+                self.show_admin_delete()
+
+        self.make_button(
+            parent,
+            "🗑️ Delete Selected Contact",
+            delete,
+            COLORS["danger"]
+        ).pack(
+            pady=(0, 15)
+        )
+
+    def create_delete_reports_tab(self, parent):
+        parent.rowconfigure(
+            0,
+            weight=1
+        )
+
+        parent.columnconfigure(
+            0,
+            weight=1
+        )
+
+        tree = self.create_tree(
+            parent,
+            (
+                "id",
+                "user",
+                "category",
+                "title",
+                "phone",
+                "created"
+            ),
+            (
+                "ID",
+                "User",
+                "Category",
+                "Title",
+                "Phone",
+                "Created"
+            ),
+            (
+                50,
+                120,
+                110,
+                200,
+                130,
+                170
+            )
+        )
+
+        for report in self.db.get_reports():
+            tree.insert(
+                "",
+                "end",
+                values=(
+                    report["id"],
+                    report["username"],
+                    report["category"],
+                    report["title"],
+                    report["phone"],
+                    report["created_at"]
+                )
+            )
+
+        def delete():
+            selected = tree.selection()
+
+            if not selected:
+                messagebox.showwarning(
+                    "Delete Report",
+                    "Select a report first."
+                )
+                return
+
+            values = tree.item(
+                selected[0],
+                "values"
+            )
+
+            if messagebox.askyesno(
+                "Confirm Delete",
+                f"Delete report '{values[3]}'?"
+            ):
+                self.db.delete_report(
+                    values[0]
+                )
+
+                self.show_admin_delete()
+
+        self.make_button(
+            parent,
+            "🗑️ Delete Selected Report",
+            delete,
+            COLORS["danger"]
+        ).pack(
+            pady=(0, 15)
+        )
+
+    def create_delete_services_tab(self, parent):
+        parent.rowconfigure(
+            0,
+            weight=1
+        )
+
+        parent.columnconfigure(
+            0,
+            weight=1
+        )
+
+        tree = self.create_tree(
+            parent,
+            (
+                "id",
+                "category",
+                "title",
+                "phone",
+                "image"
+            ),
+            (
+                "ID",
+                "Category",
+                "Title",
+                "Phone",
+                "Image"
+            ),
+            (
+                50,
+                120,
+                240,
+                130,
+                120
+            )
+        )
+
+        for service in self.db.get_services():
+            tree.insert(
+                "",
+                "end",
+                values=(
+                    service["id"],
+                    service["category"],
+                    service["title"],
+                    service["phone"],
+                    service["image_key"]
+                )
+            )
+
+        def delete():
+            selected = tree.selection()
+
+            if not selected:
+                messagebox.showwarning(
+                    "Delete Service",
+                    "Select a service first."
+                )
+                return
+
+            values = tree.item(
+                selected[0],
+                "values"
+            )
+
+            if messagebox.askyesno(
+                "Confirm Delete",
+                f"Delete service '{values[2]}'?"
+            ):
+                self.db.delete_service(
+                    values[0]
+                )
+
+                self.show_admin_delete()
+
+        self.make_button(
+            parent,
+            "🗑️ Delete Selected Service",
+            delete,
+            COLORS["danger"]
+        ).pack(
+            pady=(0, 15)
+        )
+
+    def show_phone(self, phone):
+        messagebox.showinfo(
+            "Emergency Number",
+            f"Emergency phone number:\n\n{phone}"
+        )
+
+    def go_back(self):
+        if self.current_admin:
+            self.show_admin_overview()
+        elif self.current_user:
+            self.show_dashboard()
+        else:
+            self.show_home()
+
+    def logout(self):
+        self.current_user = None
+        self.show_home()
+
+    def admin_logout(self):
+        self.current_admin = None
+        self.show_home()
+
+    def on_close(self):
+        try:
+            self.db.close()
+        except Exception:
+            pass
+
+        self.root.destroy()
+
+
+if __name__ == "__main__":
+    root = tk.Tk()
+    app = EmergencyApp(root)
+    root.mainloop()
